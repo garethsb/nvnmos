@@ -1359,6 +1359,9 @@ pub(crate) fn build_nvdsudpsink(
         // Rivermax paces egress from buffer timestamps / PTP — not the
         // pipeline clock. Override via transport-properties if needed.
         .property("sync", false)
+        // Same rationale as [`build_mxlsink`] / [`build_udpsink`]: mid-stream
+        // IS-05 re-enable swaps the inner chain behind a block probe.
+        .property("async", false)
         .build()
         .with_context(|| {
             format!(
@@ -2885,6 +2888,114 @@ mod tests {
     #[test]
     fn rebuild_chain_opts_drain_defaults_to_false() {
         assert!(!RebuildChainOpts::default().drain_downstream);
+    }
+
+    /// Minimal nmossink topology with a live upstream source at PLAYING.
+    fn playing_nmossink_sim_bin() -> (gst::Pipeline, gst::Bin, gst::GhostPad) {
+        let caps = gst::Caps::from_str(
+            "video/x-raw,format=RGBA,width=320,height=240,framerate=30/1",
+        )
+        .expect("test caps");
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .build()
+            .expect("videotestsrc");
+        let filt = gst::ElementFactory::make("capsfilter")
+            .property("caps", &caps)
+            .build()
+            .expect("capsfilter");
+        let nmos_bin = gst::Bin::with_name("nmossink-sim");
+        let initial = build_fake_sink().expect("initial fake sink");
+        let ghost = build_initial(&nmos_bin, initial, "sink", gst::PadDirection::Sink)
+            .expect("build_initial");
+        nmos_bin.add_pad(&ghost).expect("add ghost pad");
+        let nmos_elem: &gst::Element = nmos_bin.upcast_ref();
+        pipeline
+            .add_many([&src, &filt, nmos_elem])
+            .expect("add pipeline children");
+        gst::Element::link_many([&src, &filt]).expect("link src to capsfilter");
+        filt.link_pads(Some("src"), &nmos_bin, Some("sink"))
+            .expect("link capsfilter to nmossink ghost");
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline -> PLAYING");
+        let (_ret, state, _pending) = pipeline.state(gst::ClockTime::from_seconds(5));
+        assert_eq!(state, gst::State::Playing, "pipeline must reach PLAYING");
+        (pipeline, nmos_bin, ghost)
+    }
+
+    fn fakesink_for_rebuild_test(name: &str, async_flag: bool) -> gst::Element {
+        gst::ElementFactory::make("fakesink")
+            .name(name)
+            .property("async", async_flag)
+            .property("sync", true)
+            .build()
+            .unwrap_or_else(|e| panic!("fakesink `{name}` (async={async_flag}): {e}"))
+    }
+
+    /// `GstBaseSink` defaults to `async=true`. Mid-stream [`rebuild_chain`]
+    /// blocks the anchor pad, so a newly-added sink cannot preroll and
+    /// [`wait_for_chain_state`] times out — the failure mode IS-05
+    /// re-enable hits when `nvdsudpsink` leaves `async` at default.
+    #[test]
+    fn rebuild_chain_mid_playing_fails_when_inner_sink_async_true() {
+        init_gst();
+        let cat = test_log_cat();
+        let (pipeline, nmos_bin, ghost) = playing_nmossink_sim_bin();
+        let async_sink = fakesink_for_rebuild_test("inner-async-true", true);
+
+        let err = rebuild_chain(cat, &nmos_bin, &ghost, &async_sink, "sink")
+            .expect_err("async=true inner must stall behind anchor block probe");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("ASYNC"),
+            "wait_for_chain_state should report ASYNC stall, got: {msg}",
+        );
+
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    /// Mirrors [`build_mxlsink`] / [`build_udpsink`]: `async=false` lets
+    /// READY→PAUSED complete synchronously while the anchor probe blocks
+    /// downstream preroll.
+    #[test]
+    fn rebuild_chain_mid_playing_succeeds_when_inner_sink_async_false() {
+        init_gst();
+        let cat = test_log_cat();
+        let (pipeline, nmos_bin, ghost) = playing_nmossink_sim_bin();
+        let sync_sink = fakesink_for_rebuild_test("inner-async-false", false);
+
+        rebuild_chain(cat, &nmos_bin, &ghost, &sync_sink, "sink")
+            .expect("async=false inner must swap while PLAYING");
+
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    /// `nvdsudpsink` is a `GstBaseSink` — same default as `fakesink` here.
+    #[test]
+    fn basesink_factory_default_async_is_true() {
+        init_gst();
+        let sink = gst::ElementFactory::make("fakesink")
+            .build()
+            .expect("fakesink");
+        assert!(
+            sink.property::<bool>("async"),
+            "GstBaseSink async defaults to true; nmossink inner sinks must override",
+        );
+    }
+
+    #[test]
+    fn build_nvdsudpsink_pins_async_false_for_mid_stream_rebuild() {
+        if !nvdsudp_available() {
+            return;
+        }
+        let chain = build_nvdsudpsink(&minimal_udp_media(), "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\n")
+            .expect("nvdsudpsink chain");
+        assert!(
+            !chain.transport.property::<bool>("async"),
+            "nvdsudpsink must match udpsink/mxlsink async=false for rebuild_chain",
+        );
     }
 
     fn leg_with_source(ip: &str) -> UdpLeg {
