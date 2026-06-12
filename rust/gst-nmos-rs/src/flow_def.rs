@@ -383,7 +383,7 @@ pub(crate) struct FlowDefBuildInput<'a> {
     /// `urn:x-nvnmos:tag:name` tag (required by `libnvnmos`).
     /// Required non-empty.
     pub(crate) name: &'a str,
-    /// Resolved MXL Domain id (UUID). Emitted as
+    /// Resolved MXL domain id (UUID). Emitted as
     /// `urn:x-nvnmos:tag:mxl-domain-id` — required by `libnvnmos` to
     /// resolve the IS-05 `mxl_domain_id` transport parameter at
     /// activation time.

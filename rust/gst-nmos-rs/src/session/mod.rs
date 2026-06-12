@@ -159,14 +159,14 @@ pub(crate) const DEPAY_PROPERTIES_BLURB: &str =
      logged if non-empty). Takes effect on the next chain build.";
 
 pub(crate) const AUTO_ACTIVATE_BLURB: &str =
-    "Bring the inner `mxlsink` / `mxlsrc` up immediately at \
-     NULL\u{2192}READY (or, for deferred-mode senders, READY\u{2192}PAUSED) \
-     once the configuring flow_def has been resolved, and call \
-     `SyncResourceState` on the daemon to advertise the resource as \
-     active on IS-04/IS-05 without waiting for an IS-05 PATCH. \
-     Default `false` gives canonical NMOS behaviour: the resource is \
-     registered (so it appears on IS-04) but the data path stays on \
-     the fake chain until an external IS-05 controller activates it.";
+    "At NULL\u{2192}READY (or, for deferred-mode senders, READY\u{2192}PAUSED), \
+     install a real inner chain (with the transport sink or source) instead of \
+     the fake chain once the configuring transport file has been resolved — not \
+     a shortcut to PLAYING; child state still follows the bin. When `true`, \
+     also call `SyncResourceState` so the daemon advertises the resource as \
+     active on IS-04/IS-05 without an IS-05 PATCH. Default `false`: register on \
+     IS-04 but keep the fake chain until an external IS-05 controller activates \
+     the resource.";
 
 /// Snapshot of the properties needed to open a session, taken under
 /// the per-element settings lock so the lock isn't held over the
@@ -733,8 +733,9 @@ pub(super) fn caps_format(settings: &CommonSettings) -> FlowFormat {
 /// Honour `auto-activate` at setup time. When `auto_activate` is
 /// `false` and `decide_inner_config_mxl` / `decide_inner_config_udp`
 /// would have produced a real transport chain, downgrade to
-/// [`InnerConfig::Fake`] so the data path stays inactive until an
-/// IS-05 PATCH activates the resource (the canonical NMOS path).
+/// [`InnerConfig::Fake`] so the bin keeps the fake chain until an
+/// IS-05 PATCH swaps a real chain in (the canonical NMOS path).
+/// This gates Real vs Fake inner selection only — not PLAYING.
 ///
 /// The resource registration itself isn't affected — that's driven
 /// by whether a configuring transport file is in play, not by the

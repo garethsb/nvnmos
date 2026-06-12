@@ -75,7 +75,7 @@ pub(crate) enum DomainError {
     MissingId { path: PathBuf },
 }
 
-/// Origin of the resolved MXL Domain id. Diagnostic only.
+/// Origin of the resolved MXL domain id. Diagnostic only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DomainIdOrigin {
     /// User supplied `mxl-domain-id`; no `domain_def.json` consulted
