@@ -52,13 +52,13 @@ See the [container definitions](https://github.com/NVIDIA/nvnmos/tree/main/docke
 
 The NvNmos library supports the following specifications, using the [Sony nmos-cpp](https://github.com/sony/nmos-cpp) implementation internally:
 - [AMWA IS-04 NMOS Discovery and Registration Specification](https://specs.amwa.tv/is-04/) v1.3
-- [AMWA IS-05 NMOS Device Connection Management Specification](https://specs.amwa.tv/is-05/) v1.1 and v1.2-dev (for MXL)
+- [AMWA IS-05 NMOS Device Connection Management Specification](https://specs.amwa.tv/is-05/) v1.2
 - [AMWA IS-09 NMOS System Parameters Specification](https://specs.amwa.tv/is-09/) v1.0
 - [AMWA BCP-002-01 Natural Grouping of NMOS Resources](https://specs.amwa.tv/bcp-002-01/) v1.0
 - [AMWA BCP-002-02 NMOS Asset Distinguishing Information](https://specs.amwa.tv/bcp-002-02/) v1.0
 - [AMWA BCP-004-01 NMOS Receiver Capabilities](https://specs.amwa.tv/bcp-004-01/) v1.0
 - [AMWA BCP-006-01 NMOS With JPEG XS](https://specs.amwa.tv/bcp-006-01/) v1.0
-- [AMWA BCP-007-03 NMOS With MXL](https://specs.amwa.tv/bcp-007-03/) v1.0-dev
+- [AMWA BCP-007-03 NMOS With MXL](https://specs.amwa.tv/bcp-007-03/) v1.0
 - Session Description Protocol conforming to SMPTE ST 2110-20, -22, -30, -40, and ST 2022-7
 - MXL flow definition JSON as consumed by the [MXL SDK](https://github.com/dmf-mxl/mxl)
 

@@ -224,7 +224,7 @@ pub(crate) struct CommonSettings {
     /// MXL Domain identifier (UUID) included as
     /// `urn:x-nvnmos:tag:mxl-domain-id` in the flow_def. If
     /// `mxl_domain_path` is also set and contains a `domain_def.json`
-    /// (AMWA BCP-007-03 WIP), the file's `id` is cross-checked
+    /// (AMWA BCP-007-03), the file's `id` is cross-checked
     /// against this property — see [`crate::domain`].
     pub(crate) mxl_domain_id: String,
     /// Local filesystem path identifying the MXL Domain on this host.
