@@ -10,7 +10,7 @@
 //! `mxl-domain-path` GObject properties surface the two facets
 //! independently.
 //!
-//! AMWA BCP-007-03 (work-in-progress) further says every MXL Domain
+//! AMWA BCP-007-03 further says every MXL Domain
 //! holds a `domain_def.json` file in its host directory whose `id`
 //! field is the Domain's authoritative UUID. This module reads that
 //! file when present and cross-checks it against the user-supplied

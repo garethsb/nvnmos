@@ -48,13 +48,13 @@
  *
  * The NvNmos library supports the following specifications, using the <a href="https://github.com/sony/nmos-cpp">Sony nmos-cpp</a> implementation:
  * - <a href="https://specs.amwa.tv/is-04/">AMWA IS-04 NMOS Discovery and Registration Specification</a> v1.3
- * - <a href="https://specs.amwa.tv/is-05/">AMWA IS-05 NMOS Device Connection Management Specification</a> v1.1 and v1.2-dev (for MXL)
+ * - <a href="https://specs.amwa.tv/is-05/">AMWA IS-05 NMOS Device Connection Management Specification</a> v1.2
  * - <a href="https://specs.amwa.tv/is-09/">AMWA IS-09 NMOS System Parameters Specification</a> v1.0
  * - <a href="https://specs.amwa.tv/bcp-002-01/">AMWA BCP-002-01 Natural Grouping of NMOS Resources</a> v1.0
  * - <a href="https://specs.amwa.tv/bcp-002-02/">AMWA BCP-002-02 NMOS Asset Distinguishing Information</a> v1.0
  * - <a href="https://specs.amwa.tv/bcp-004-01/">AMWA BCP-004-01 NMOS Receiver Capabilities</a> v1.0
  * - <a href="https://specs.amwa.tv/bcp-006-01/">AMWA BCP-006-01 NMOS With JPEG XS</a> v1.0
- * - <a href="https://specs.amwa.tv/bcp-007-03/">AMWA BCP-007-03 NMOS With MXL</a> v1.0-dev
+ * - <a href="https://specs.amwa.tv/bcp-007-03/">AMWA BCP-007-03 NMOS With MXL</a> v1.0
  * - Session Description Protocol conforming to SMPTE ST 2110-20, -22, -30, -40, and ST 2022-7
  * - MXL flow definition JSON as consumed by the <a href="https://github.com/dmf-mxl/mxl">MXL SDK</a>
  *

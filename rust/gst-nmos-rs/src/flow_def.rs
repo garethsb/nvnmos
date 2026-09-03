@@ -407,7 +407,7 @@ pub(crate) struct FlowDefOverrides<'a> {
 /// does not have to special-case them — pass `None` when the
 /// property is empty.
 ///
-/// libnvnmos's [BCP-007-03 WIP] reading rule for the caps tag is
+/// libnvnmos's BCP-007-03 reading rule for the caps tag is
 /// "present + non-empty array means unconstrained"; `CapsMode::Unconstrained` writes
 /// `[""]` to satisfy that rule, `CapsMode::Constrained` removes the tag,
 /// and `CapsMode::Auto` leaves the file's existing presence alone.
