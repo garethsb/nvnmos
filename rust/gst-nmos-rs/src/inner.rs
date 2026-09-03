@@ -93,9 +93,10 @@ const PROBE_WAIT: Duration = Duration::from_secs(1);
 /// ([`wait_for_chain_state`]). Healthy swaps usually finish in
 /// milliseconds: on [`nmossink`] sender sinks are pinned `async=false`
 /// in `build_real_sink` (READY→PAUSED without preroll); on [`nmossrc`]
-/// receiver sources `start()` is typically fast. The 1s budget catches
-/// genuine stalls (e.g. libmxl `createFlowWriter` failing) without
-/// dragging out a healthy activation.
+/// `start()` runs after the block probe is lifted and is typically
+/// fast. The 1s budget catches genuine stalls (e.g. libmxl
+/// `createFlowWriter` failing) without dragging out a healthy
+/// activation.
 const STATE_WAIT: gst::ClockTime = gst::ClockTime::from_seconds(1);
 
 /// Options for [`rebuild_chain_with_opts`]. When `drain_downstream` is
@@ -125,15 +126,20 @@ pub(crate) struct RebuildChainOpts {
 /// 3. Unlink the anchor from the old chain, take it to `NULL`, and
 ///    remove it from the bin.
 /// 4. Add the new chain to the bin and link the anchor to it.
-/// 5. `sync_state_with_parent()` + a synchronous `state(timeout)`
-///    check. If the chain doesn't reach the parent's state within
-///    [`STATE_WAIT`], return `Err` so the caller can ack the IS-05
-///    activation as `Failed` — but the probe is still removed
-///    afterwards so the data path doesn't wedge.
-/// 6. Remove the probe. The next buffer push at the anchor forwards
-///    sticky events (STREAM_START, CAPS, SEGMENT) to the new chain
-///    automatically, so e.g. `mxlsink::set_caps` fires before the
-///    first `render()`.
+/// 5. Bring the new chain up to the state [`StateSync`] permits while
+///    the probe is still held — the parent's target state for a
+///    sink-direction chain, only `Ready` for a source-direction one.
+/// 6. Remove the probe. On a sink-direction bin the next buffer push at
+///    the anchor forwards sticky events (STREAM_START, CAPS, SEGMENT) to
+///    the new chain automatically, so e.g. `mxlsink::set_caps` fires
+///    before the first `render()`.
+/// 7. For a source-direction chain, only now advance it to the parent's
+///    target state.
+///
+/// Steps 5 and 7 both end in a synchronous `state(timeout)` check. If the
+/// chain doesn't settle within [`STATE_WAIT`], return `Err` so the caller
+/// can ack the IS-05 activation as `Failed` — the probe is removed either
+/// way so the data path doesn't wedge.
 ///
 /// `pad_name` is the outer-facing pad name on `new_chain` —
 /// `"sink"` for sink-direction bins, `"src"` for source-direction
@@ -194,7 +200,11 @@ pub(crate) fn rebuild_chain_with_opts(
         probe_pad.name(),
         if result.is_ok() { "ok" } else { "err" },
     );
-    result
+
+    if result? == StateSync::AfterUnblock {
+        advance_chain_to_parent_target(cat, bin, new_chain)?;
+    }
+    Ok(())
 }
 
 /// [`rebuild_chain_with_opts`] with default options (no downstream drain).
@@ -215,6 +225,32 @@ pub(crate) fn rebuild_chain(
     )
 }
 
+/// How far [`swap_chain_inner`] took the incoming chain, i.e. whether
+/// [`rebuild_chain_with_opts`] still owes it an advance to the parent's
+/// target state once the anchor block probe is lifted.
+///
+/// Source-direction chains stop at `Ready` under the probe. A source that
+/// negotiates from `BaseSrc::start()` — gst-plugins-rs `udpsrc2` calls
+/// `gst_base_src_set_caps` there — pushes CAPS downstream during
+/// READY→PAUSED, and `BLOCK_DOWNSTREAM` covers serialized events as well
+/// as buffers. Driving such a chain past `Ready` while we hold the probe
+/// deadlocks the swap against itself: `gst_base_src_set_caps` pushes
+/// CAPS into the blocked pad and waits, and the swap is the thread that
+/// would remove the probe. `Ready` is still reached under the probe
+/// because that is where transports acquire their resources (`udpsrc2`
+/// binds its socket and joins the group in NULL→READY), and a failure
+/// there must still fail the activation.
+///
+/// Sink-direction chains keep the whole advance inside the block: nothing
+/// they do travels downstream through the anchor, and reaching the parent
+/// target before the probe lifts is what keeps the first buffer off an
+/// inactive pad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateSync {
+    Done,
+    AfterUnblock,
+}
+
 /// Inner half of [`rebuild_chain_with_opts`] — runs with the anchor pad held
 /// blocked. Factored out so we can `?`-propagate errors and still
 /// remove the probe unconditionally in the caller.
@@ -226,14 +262,10 @@ fn swap_chain_inner(
     new_chain: &gst::Element,
     new_chain_pad_name: &str,
     ghost: &gst::GhostPad,
-) -> Result<(), anyhow::Error> {
-    // Direction-dependent pad on the anchor that's actually linked to
-    // the old chain. For sink-direction this is the same as
-    // `probe_pad` (anchor.src ↔ old_chain.sink). For source-direction
-    // it's the opposite pad (old_chain.src ↔ anchor.sink) — we still
-    // block at `probe_pad` (anchor.src) because that's the only pad
-    // GStreamer can hold downstream-blocked, even though we
-    // unlink/link on the other side.
+) -> Result<StateSync, anyhow::Error> {
+    // Chain-facing pad on the anchor — the same pad `rebuild_chain`
+    // blocked. Sink-direction: `anchor.src` ↔ old_chain.sink.
+    // Source-direction: old_chain.src ↔ `anchor.sink`.
     let (link_pad_name, _) = match ghost.direction() {
         gst::PadDirection::Sink => ("src", "sink"),
         gst::PadDirection::Src => ("sink", "src"),
@@ -310,6 +342,29 @@ fn swap_chain_inner(
         ));
     }
 
+    match ghost.direction() {
+        gst::PadDirection::Src => {
+            ready_chain(cat, new_chain)?;
+            Ok(StateSync::AfterUnblock)
+        }
+        gst::PadDirection::Sink => {
+            advance_chain_to_parent_target(cat, bin, new_chain)?;
+            Ok(StateSync::Done)
+        }
+        _ => unreachable!("checked in rebuild_chain"),
+    }
+}
+
+/// Pull `chain` up to the parent bin's target state and wait for it to
+/// settle. For source-direction chains this runs with the anchor block
+/// probe already lifted, so a source that negotiates from `start()` can
+/// push CAPS through the anchor instead of deadlocking on it (see
+/// [`StateSync`]).
+fn advance_chain_to_parent_target(
+    cat: &gst::DebugCategory,
+    bin: &gst::Bin,
+    new_chain: &gst::Element,
+) -> Result<(), anyhow::Error> {
     new_chain
         .sync_state_with_parent()
         .with_context(|| format!("syncing state of `{}` with parent", new_chain.name()))?;
@@ -434,10 +489,11 @@ fn block_and_wait(
 ///
 /// The 1-second budget ([`STATE_WAIT`]) is deliberately generous.
 /// Sender inner chains (`nmossink`) rely on `async=false` pinned in
-/// `build_real_sink`; receiver inner chains (`nmossrc`) rely on a
-/// quick source `start()`. Anything longer is almost certainly a real
-/// stall worth surfacing to the controller rather than a slow transition
-/// we should wait out.
+/// `build_real_sink` so READY→PAUSED can finish under the block probe.
+/// Receiver inner chains (`nmossrc`) call this again after the probe is
+/// lifted, when `start()` is allowed to push CAPS. Anything longer is
+/// almost certainly a real stall worth surfacing to the controller
+/// rather than a slow transition we should wait out.
 fn wait_for_chain_state(
     cat: &gst::DebugCategory,
     bin: &gst::Bin,
@@ -481,6 +537,26 @@ fn wait_for_chain_state(
              current={current:?}, pending={pending:?}, parent_target={parent_target:?}",
         ),
     }
+}
+
+/// Take `chain` to `Ready` with a bounded wait — as far as a
+/// source-direction chain may go while the anchor block probe is held
+/// (see [`StateSync`]). Transports allocate their resources on the way
+/// to `Ready`, so a failure to get there is still a failed activation.
+fn ready_chain(cat: &gst::DebugCategory, chain: &gst::Element) -> Result<(), anyhow::Error> {
+    let name = chain.name();
+    chain
+        .set_state(gst::State::Ready)
+        .map_err(|e| anyhow!("`{name}` failed to start Ready transition: {e:?}"))?;
+    let (ret, current, pending) = chain.state(STATE_WAIT);
+    if current == gst::State::Ready {
+        gst::debug!(cat, "rebuild_chain: `{name}` reached Ready (ret={ret:?})");
+        return Ok(());
+    }
+    bail!(
+        "`{name}` did not reach Ready within {STATE_WAIT} \
+         (ret={ret:?}, current={current:?}, pending={pending:?})"
+    )
 }
 
 /// Take `chain` to `Null` with a bounded wait. Called from the
@@ -1891,7 +1967,9 @@ mod tests {
     use super::*;
     use crate::session::udp::types::UdpLeg;
     use std::str::FromStr;
-    use std::sync::LazyLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, LazyLock};
+    use std::time::Duration;
 
     use crate::test_support::init_gst;
 
@@ -3382,6 +3460,178 @@ mod tests {
         rebuild_chain(cat, &nmos_bin, &ghost, &sync_sink, "sink")
             .expect("async=false inner must swap while PLAYING");
 
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    /// Live `PushSrc` that calls `gst_base_src_set_caps` from `start()`
+    /// (READY→PAUSED), matching gst-plugins-rs `udpsrc2`. `videotestsrc`
+    /// negotiates on its streaming thread instead, so it does not
+    /// reproduce the swap-thread hang.
+    mod caps_in_start_src {
+        use super::*;
+        use gst::glib;
+        use gstreamer_base as gst_base;
+        use gstreamer_base::prelude::*;
+        use gstreamer_base::subclass::prelude::*;
+
+        glib::wrapper! {
+            pub struct CapsInStartSrc(ObjectSubclass<imp::CapsInStartSrc>) @extends gst_base::PushSrc, gst_base::BaseSrc, gst::Element, gst::Object;
+        }
+
+        pub fn make() -> gst::Element {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                gst::Element::register(
+                    None,
+                    "nmostestcapsinstartsrc",
+                    gst::Rank::NONE,
+                    CapsInStartSrc::static_type(),
+                )
+                .expect("register nmostestcapsinstartsrc");
+            });
+            gst::ElementFactory::make("nmostestcapsinstartsrc")
+                .build()
+                .expect("nmostestcapsinstartsrc")
+        }
+
+        mod imp {
+            use super::*;
+
+            #[derive(Default)]
+            pub struct CapsInStartSrc;
+
+            #[glib::object_subclass]
+            impl ObjectSubclass for CapsInStartSrc {
+                const NAME: &'static str = "NmosTestCapsInStartSrc";
+                type Type = super::CapsInStartSrc;
+                type ParentType = gst_base::PushSrc;
+            }
+
+            impl ObjectImpl for CapsInStartSrc {
+                fn constructed(&self) {
+                    self.parent_constructed();
+                    let obj = self.obj();
+                    obj.set_live(true);
+                    obj.set_format(gst::Format::Time);
+                }
+            }
+
+            impl GstObjectImpl for CapsInStartSrc {}
+
+            impl ElementImpl for CapsInStartSrc {
+                fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
+                    static M: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
+                        gst::subclass::ElementMetadata::new(
+                            "Test source that set_caps in start",
+                            "Source",
+                            "Test double for BaseSrc::start set_caps vs rebuild_chain block",
+                            "NVIDIA",
+                        )
+                    });
+                    Some(&*M)
+                }
+
+                fn pad_templates() -> &'static [gst::PadTemplate] {
+                    static T: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
+                        vec![
+                            gst::PadTemplate::new(
+                                "src",
+                                gst::PadDirection::Src,
+                                gst::PadPresence::Always,
+                                &gst::Caps::new_any(),
+                            )
+                            .unwrap(),
+                        ]
+                    });
+                    T.as_ref()
+                }
+            }
+
+            impl BaseSrcImpl for CapsInStartSrc {
+                fn start(&self) -> Result<(), gst::ErrorMessage> {
+                    let caps = gst::Caps::builder("application/x-nmos-test").build();
+                    let _ = self.obj().set_caps(&caps);
+                    Ok(())
+                }
+            }
+
+            impl PushSrcImpl for CapsInStartSrc {
+                fn create(
+                    &self,
+                    _buffer: Option<&mut gst::BufferRef>,
+                ) -> Result<gst_base::subclass::base_src::CreateSuccess, gst::FlowError>
+                {
+                    Err(gst::FlowError::Eos)
+                }
+            }
+        }
+    }
+
+    /// Minimal nmossrc topology at PLAYING: fake `appsrc` (no caps, so
+    /// `start()` does not push CAPS) behind the identity anchor, ghosted
+    /// out to a `fakesink`.
+    fn playing_nmossrc_sim_bin() -> (gst::Pipeline, gst::Bin, gst::GhostPad) {
+        let pipeline = gst::Pipeline::new();
+        let nmos_bin = gst::Bin::with_name("nmossrc-sim");
+        let initial = build_fake_src(None).expect("initial fake src");
+        let ghost = build_initial(&nmos_bin, initial, "src", gst::PadDirection::Src)
+            .expect("build_initial");
+        nmos_bin.add_pad(&ghost).expect("add ghost pad");
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("async", false)
+            .property("sync", false)
+            .build()
+            .expect("fakesink");
+        let nmos_elem: &gst::Element = nmos_bin.upcast_ref();
+        pipeline
+            .add_many([nmos_elem, &sink])
+            .expect("add pipeline children");
+        nmos_bin
+            .link_pads(Some("src"), &sink, Some("sink"))
+            .expect("link nmossrc ghost to fakesink");
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline -> PLAYING");
+        let (_ret, state, _pending) = pipeline.state(gst::ClockTime::from_seconds(5));
+        assert_eq!(state, gst::State::Playing, "pipeline must reach PLAYING");
+        (pipeline, nmos_bin, ghost)
+    }
+
+    /// Mid-stream [`rebuild_chain`] holds `BLOCK_DOWNSTREAM` on the
+    /// identity sink. A source that pushes CAPS from `start()` on the
+    /// state-change thread (as `udpsrc2` does) deadlocks against that
+    /// probe — the IS-05 `auto-activate=false` hang while PLAYING.
+    ///
+    /// A hang watchdog converts a wedged swap into a hard failure; after
+    /// the source-direction READY-under-block split this must return.
+    #[test]
+    fn rebuild_chain_mid_playing_src_set_caps_in_start_does_not_hang() {
+        init_gst();
+        let cat = test_log_cat();
+        let (pipeline, nmos_bin, ghost) = playing_nmossrc_sim_bin();
+
+        let new_src = caps_in_start_src::make();
+
+        const HANG_TIMEOUT: Duration = Duration::from_secs(5);
+        let finished = Arc::new(AtomicBool::new(false));
+        {
+            let finished = Arc::clone(&finished);
+            std::thread::spawn(move || {
+                std::thread::sleep(HANG_TIMEOUT);
+                if !finished.load(Ordering::SeqCst) {
+                    eprintln!(
+                        "nmossrc-sim rebuild_chain hung for {HANG_TIMEOUT:?} — \
+                         likely CAPS from BaseSrc::start blocked on the anchor probe"
+                    );
+                    std::process::abort();
+                }
+            });
+        }
+
+        rebuild_chain(cat, &nmos_bin, &ghost, &new_src, "src")
+            .expect("source that set_caps in start() must swap while PLAYING");
+
+        finished.store(true, Ordering::SeqCst);
         let _ = pipeline.set_state(gst::State::Null);
     }
 
