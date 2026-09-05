@@ -11,7 +11,9 @@ exec gst-launch-1.0 -e \
         daemon-uri="$DEMO_DAEMON_URI" \
         transport=mxl \
         node-seed=example-flipper \
+        node-properties="properties,label=flipper" \
         http-port=18104 \
+        $(demo_nmos_node_props) \
         receiver-name=video-in \
         mxl-domain-id="$DEMO_MXL_DOMAIN_ID" \
         mxl-domain-path="$DEMO_MXL_DOMAIN_PATH" \
@@ -24,7 +26,9 @@ exec gst-launch-1.0 -e \
         daemon-uri="$DEMO_DAEMON_URI" \
         transport=mxl \
         node-seed=example-flipper \
+        node-properties="properties,label=flipper" \
         http-port=18104 \
+        $(demo_nmos_node_props) \
         sender-name=video-out \
         mxl-domain-id="$DEMO_MXL_DOMAIN_ID" \
         mxl-domain-path="$DEMO_MXL_DOMAIN_PATH" \

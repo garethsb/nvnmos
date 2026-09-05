@@ -122,6 +122,9 @@ prefix. Example scripts and the interactive demo both source this file.
 |----------|------|
 | `DEMO_DAEMON_SOCK` | gRPC UDS path for `nvnmosd` (default `/tmp/nvnmosd.sock`) |
 | `DEMO_DAEMON_URI` | `unix:` URI derived from `DEMO_DAEMON_SOCK` (used as `daemon-uri`) |
+| `DEMO_NMOS_DOMAIN` | Optional DNS-SD domain (`local` = mDNS only). Empty omits `domain`, which selects automatic discovery. |
+| `DEMO_REGISTRATION_URL` | Optional IS-04 Registration API URL. Empty omits `registration-url`, which uses DNS-SD. |
+| `DEMO_HOST_NAME` | Optional IS-04 Node `host-name`. Empty omits `host-name`; libnvnmos uses the system hostname (and a domain suffix if the name is not already fully qualified). Must be a DNS name, not an IP address. |
 | `DEMO_NIC_IP` | Local NIC for UDP IS-05 endpoint props and SDP source-filter |
 | `DEMO_UDP_TRANSPORT` | `transport` on example pipelines: `udp`, `udp2`, or `nvdsudp` |
 | `DEMO_MXL_DOMAIN_ID` / `DEMO_MXL_DOMAIN_PATH` | MXL shared-memory domain |

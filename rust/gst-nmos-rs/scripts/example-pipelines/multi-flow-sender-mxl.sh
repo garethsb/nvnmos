@@ -11,14 +11,18 @@ exec gst-launch-1.0 -e \
     videotestsrc is-live=true ! "$DEMO_MXL_VIDEO_CAPS" ! \
     nmossink daemon-uri="$DEMO_DAEMON_URI" transport=mxl \
         node-seed=example-multi sender-name=video1 \
+        node-properties="properties,label=multi" \
         http-port=18105 \
+        $(demo_nmos_node_props) \
         mxl-domain-id="$DEMO_MXL_DOMAIN_ID" mxl-domain-path="$DEMO_MXL_DOMAIN_PATH" \
         mxl-flow-id="$DEMO_MXL_VIDEO_FLOW_ID1" caps="$DEMO_MXL_VIDEO_CAPS" \
         label="${DEMO_MXL_VIDEO_LABEL} sender" auto-activate=true \
     audiotestsrc wave=sine freq=440 is-live=true ! "$DEMO_MXL_AUDIO_CAPS" ! \
     nmossink daemon-uri="$DEMO_DAEMON_URI" transport=mxl \
         node-seed=example-multi sender-name=audio1 \
+        node-properties="properties,label=multi" \
         http-port=18105 \
+        $(demo_nmos_node_props) \
         mxl-domain-id="$DEMO_MXL_DOMAIN_ID" mxl-domain-path="$DEMO_MXL_DOMAIN_PATH" \
         mxl-flow-id="$DEMO_MXL_AUDIO_FLOW_ID1" caps="$DEMO_MXL_AUDIO_CAPS" \
         label="${DEMO_MXL_AUDIO_LABEL} sender" auto-activate=true

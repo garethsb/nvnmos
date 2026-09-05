@@ -18,6 +18,18 @@
 export DEMO_DAEMON_SOCK=${DEMO_DAEMON_SOCK:-/tmp/nvnmosd.sock}
 export DEMO_DAEMON_URI="unix:${DEMO_DAEMON_SOCK}"
 
+# Optional DNS-SD domain. Set to `local` to use mDNS directly.
+export DEMO_NMOS_DOMAIN=${DEMO_NMOS_DOMAIN:-}
+
+# Optional IS-04 Registration API URL. Empty uses DNS-SD.
+# Example: http://127.0.0.1:3211/x-nmos/registration/v1.3
+export DEMO_REGISTRATION_URL=${DEMO_REGISTRATION_URL:-}
+
+# Optional IS-04 Node host-name. Empty autodetects the system hostname
+# and appends the NMOS domain (typically `.local`) when the name is not
+# already fully-qualified. Must be a DNS name, not an IP address.
+export DEMO_HOST_NAME=${DEMO_HOST_NAME:-}
+
 # Local NIC for RTP/UDP IS-05 endpoint properties and SDP source-filter.
 # Skips loopback (WSL2 can assign a global-scope address on `lo`).
 # Override with DEMO_NIC_IP.
@@ -167,6 +179,25 @@ demo_unconstrained_receiver_to_map() {
     local caps=${1:-${AUDIO_CAPS_ALT:-$DEMO_UDP_AUDIO_CAPS_ALT}}
     local qname=${2:-}
     printf '%s ! %s' "$(demo_unconstrained_audio_map_input "$caps")" "$(demo_audio_queue "$qname")"
+}
+
+# Optional Node network-service and advertised-host properties.
+# Used by non-minimal example pipelines and gst-nmos-rs-demo.sh.
+# Prints nothing when every corresponding DEMO_* variable is empty.
+demo_nmos_node_props() {
+    local -a args=()
+    if [[ -n "${DEMO_NMOS_DOMAIN:-}" ]]; then
+        args+=("domain=${DEMO_NMOS_DOMAIN}")
+    fi
+    if [[ -n "${DEMO_REGISTRATION_URL:-}" ]]; then
+        args+=("registration-url=${DEMO_REGISTRATION_URL}")
+    fi
+    if [[ -n "${DEMO_HOST_NAME:-}" ]]; then
+        args+=("host-name=${DEMO_HOST_NAME}")
+    fi
+    if ((${#args[@]} > 0)); then
+        printf '%s\n' "${args[@]}"
+    fi
 }
 
 udp_video_buffer_props() {
