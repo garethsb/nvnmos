@@ -13,7 +13,9 @@ exec gst-launch-1.0 -e \
         daemon-uri="$DEMO_DAEMON_URI" \
         transport="$DEMO_UDP_TRANSPORT" \
         node-seed=example-flipper \
+        node-properties="properties,label=flipper" \
         http-port=18104 \
+        $(demo_nmos_node_props) \
         receiver-name=video-in \
         multicast-ip="$DEMO_UDP_VIDEO_MCAST_IP1" \
         destination-port="$DEMO_UDP_VIDEO_MCAST_PORT1" \
@@ -28,7 +30,9 @@ exec gst-launch-1.0 -e \
         daemon-uri="$DEMO_DAEMON_URI" \
         transport="$DEMO_UDP_TRANSPORT" \
         node-seed=example-flipper \
+        node-properties="properties,label=flipper" \
         http-port=18104 \
+        $(demo_nmos_node_props) \
         sender-name=video-out \
         destination-ip="$DEMO_UDP_VIDEO_MCAST_IP3" \
         destination-port="$DEMO_UDP_VIDEO_MCAST_PORT3" \

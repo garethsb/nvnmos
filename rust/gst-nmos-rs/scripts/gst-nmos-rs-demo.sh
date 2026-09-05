@@ -660,6 +660,8 @@ launch_node1() {
                     transport="$DEMO_TRANSPORT" \
                     http-port="$NODE1_PORT" \
                     node-seed="$NODE1_SEED" \
+                    node-properties="properties,label=producer" \
+                    $(demo_nmos_node_props) \
                     sender-name=video1 \
                     $(transport_sender_props video1) \
                     $(udp_video_buffer_props) \
@@ -674,6 +676,8 @@ launch_node1() {
                     transport="$DEMO_TRANSPORT" \
                     http-port="$NODE1_PORT" \
                     node-seed="$NODE1_SEED" \
+                    node-properties="properties,label=producer" \
+                    $(demo_nmos_node_props) \
                     sender-name=audio1 \
                     $(transport_sender_props audio1) \
                     caps="$AUDIO_CAPS" \
@@ -707,6 +711,8 @@ launch_node4() {
                     transport="$DEMO_TRANSPORT" \
                     http-port="$NODE4_PORT" \
                     node-seed="$NODE4_SEED" \
+                    node-properties="properties,label=alt-producer" \
+                    $(demo_nmos_node_props) \
                     sender-name=video4 \
                     $(transport_sender_props video4) \
                     $(udp_video_buffer_props) \
@@ -721,6 +727,8 @@ launch_node4() {
                     transport="$DEMO_TRANSPORT" \
                     http-port="$NODE4_PORT" \
                     node-seed="$NODE4_SEED" \
+                    node-properties="properties,label=alt-producer" \
+                    $(demo_nmos_node_props) \
                     sender-name=audio4 \
                     $(transport_sender_props audio4) \
                     $(udp_audio_transport_caps_alt) \
@@ -768,6 +776,8 @@ launch_node3_video() {
                 transport="$DEMO_TRANSPORT" \
                 http-port="$NODE3_PORT" \
                 node-seed="$NODE3_SEED" \
+                node-properties="properties,label=processor" \
+                $(demo_nmos_node_props) \
                 receiver-name=video-in \
                 $(transport_receiver_props video1) \
                 $(udp_video_buffer_props) \
@@ -781,6 +791,8 @@ launch_node3_video() {
                     transport="$DEMO_TRANSPORT" \
                     http-port="$NODE3_PORT" \
                     node-seed="$NODE3_SEED" \
+                    node-properties="properties,label=processor" \
+                    $(demo_nmos_node_props) \
                     sender-name=video-out \
                     $(transport_sender_props video-out) \
                     $(udp_video_buffer_props) \
@@ -804,6 +816,8 @@ launch_node3_audio() {
             nmosaudiochannelmap name=map \
                 daemon-uri="unix:$SOCK" \
                 node-seed="$NODE3_SEED" \
+                node-properties="properties,label=processor" \
+                $(demo_nmos_node_props) \
                 http-port="$NODE3_PORT" \
                 channelmapping-name="$IS08_CHANNELMAPPING_NAME" \
                 sink_0::input-id="$IS08_INPUT_0" \
@@ -823,6 +837,8 @@ launch_node3_audio() {
                 transport="$DEMO_TRANSPORT" \
                 http-port="$NODE3_PORT" \
                 node-seed="$NODE3_SEED" \
+                node-properties="properties,label=processor" \
+                $(demo_nmos_node_props) \
                 receiver-name=audio-in0 \
                 $(transport_receiver_props audio1) \
                 caps="$AUDIO_CAPS" \
@@ -834,6 +850,8 @@ launch_node3_audio() {
                 transport="$DEMO_TRANSPORT" \
                 http-port="$NODE3_PORT" \
                 node-seed="$NODE3_SEED" \
+                node-properties="properties,label=processor" \
+                $(demo_nmos_node_props) \
                 receiver-name=audio-in1 \
                 receiver-caps-mode=unconstrained \
                 $(transport_receiver_props audio4) \
@@ -847,6 +865,8 @@ launch_node3_audio() {
                     transport="$DEMO_TRANSPORT" \
                     http-port="$NODE3_PORT" \
                     node-seed="$NODE3_SEED" \
+                    node-properties="properties,label=processor" \
+                    $(demo_nmos_node_props) \
                     sender-name=audio-out0 \
                     $(transport_sender_props audio-out0) \
                     caps="$AUDIO_CAPS" \
@@ -858,6 +878,8 @@ launch_node3_audio() {
                     transport="$DEMO_TRANSPORT" \
                     http-port="$NODE3_PORT" \
                     node-seed="$NODE3_SEED" \
+                    node-properties="properties,label=processor" \
+                    $(demo_nmos_node_props) \
                     sender-name=audio-out1 \
                     $(transport_sender_props audio-out1) \
                     caps="$AUDIO_CAPS_ALT" \
@@ -891,6 +913,8 @@ launch_node2() {
                 transport="$DEMO_TRANSPORT" \
                 http-port="$NODE2_PORT" \
                 node-seed="$NODE2_SEED" \
+                node-properties="properties,label=consumer" \
+                $(demo_nmos_node_props) \
                 receiver-name=video2 \
                 receiver-caps-mode="$DEMO_RECEIVER_CAPS_MODE" \
                 $(transport_receiver_props video1) \
@@ -906,6 +930,8 @@ launch_node2() {
                 transport="$DEMO_TRANSPORT" \
                 http-port="$NODE2_PORT" \
                 node-seed="$NODE2_SEED" \
+                node-properties="properties,label=consumer" \
+                $(demo_nmos_node_props) \
                 receiver-name=audio2 \
                 receiver-caps-mode="$DEMO_RECEIVER_CAPS_MODE" \
                 $(transport_receiver_props audio1) \

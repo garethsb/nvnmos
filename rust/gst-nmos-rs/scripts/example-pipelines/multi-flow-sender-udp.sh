@@ -9,7 +9,9 @@ exec gst-launch-1.0 -e \
     videotestsrc is-live=true ! "$DEMO_UDP_VIDEO_CAPS" ! \
     nmossink daemon-uri="$DEMO_DAEMON_URI" transport="$DEMO_UDP_TRANSPORT" \
         node-seed=example-multi sender-name=video1 \
+        node-properties="properties,label=multi" \
         http-port=18105 \
+        $(demo_nmos_node_props) \
         destination-ip="$DEMO_UDP_VIDEO_MCAST_IP1" destination-port="$DEMO_UDP_VIDEO_MCAST_PORT1" \
         source-ip="$DEMO_NIC_IP" $(udp_video_buffer_props) \
         caps="$DEMO_UDP_VIDEO_CAPS" \
@@ -17,7 +19,9 @@ exec gst-launch-1.0 -e \
     audiotestsrc wave=sine freq=440 is-live=true ! "$DEMO_UDP_AUDIO_CAPS" ! \
     nmossink daemon-uri="$DEMO_DAEMON_URI" transport="$DEMO_UDP_TRANSPORT" \
         node-seed=example-multi sender-name=audio1 \
+        node-properties="properties,label=multi" \
         http-port=18105 \
+        $(demo_nmos_node_props) \
         destination-ip="$DEMO_UDP_AUDIO_MCAST_IP1" destination-port="$DEMO_UDP_AUDIO_MCAST_PORT1" \
         source-ip="$DEMO_NIC_IP" caps="$DEMO_UDP_AUDIO_CAPS" \
         label="${DEMO_UDP_AUDIO_LABEL} sender" auto-activate=true

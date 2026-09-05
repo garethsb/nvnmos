@@ -10,7 +10,9 @@ exec gst-launch-1.0 -e \
         daemon-uri="$DEMO_DAEMON_URI" \
         transport="$DEMO_UDP_TRANSPORT" \
         node-seed=example-consumer \
+        node-properties="properties,label=consumer" \
         http-port=18102 \
+        $(demo_nmos_node_props) \
         receiver-name=video2 \
         multicast-ip="$DEMO_UDP_VIDEO_MCAST_IP1" \
         destination-port="$DEMO_UDP_VIDEO_MCAST_PORT1" \
