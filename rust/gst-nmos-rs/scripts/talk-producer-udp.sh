@@ -27,7 +27,7 @@ exec gst-launch-1.0 -e \
     video/x-raw,format=UYVP,width=1920,height=1080,framerate=25/1,interlace-mode=progressive ! \
     nmossink \
         node-seed=talk-producer \
-        node-properties="properties,label=producer" \
+        node-properties="properties,label=producer-udp" \
         domain=local \
         sender-name=video1 \
         destination-ip=232.99.99.1 \
@@ -35,5 +35,5 @@ exec gst-launch-1.0 -e \
         source-ip="$DEMO_NIC_IP" \
         transport-properties="properties,buffer-size=16777216" \
         caps="video/x-raw,format=UYVP,width=1920,height=1080,framerate=25/1,interlace-mode=progressive" \
-        label="producer out" \
+        label="producer-udp out" \
         auto-activate=true
