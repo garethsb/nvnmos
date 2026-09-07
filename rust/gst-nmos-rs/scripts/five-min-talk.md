@@ -88,38 +88,33 @@ cd "$NVNMOS/rust"
 ./target/debug/nvnmosd --uds /tmp/nvnmosd.sock
 ```
 
-**Terminals 1–3** — same plugin/lib path as the env block at the top, then:
-
-```sh
-cd "$NVNMOS/rust/gst-nmos-rs"
-```
-
-Talk pipelines omit `http-port` (nvnmosd allocates) and set `domain=local`.
-UDP scripts look up the NIC with `ip` / `hostname -I` (or `DEMO_NIC_IP`);
-loopback is rejected by `libnvnmos`. MXL scripts write
-`/dev/shm/gst-nmos-rs-talk` (no NIC).
+**Terminals 1–3** — same plugin/lib path as the env block at the top (repo
+root). Talk pipelines omit `http-port` (nvnmosd allocates) and set
+`domain=local`. UDP scripts look up the NIC with `ip` / `hostname -I`
+(or `DEMO_NIC_IP`); loopback is rejected by `libnvnmos`. MXL scripts
+write `/dev/shm/gst-nmos-rs-talk` (no NIC).
 
 Pre-type, do not run yet. UDP or MXL:
 
 **Terminal 1**
 
 ```sh
-./scripts/talk-producer-udp.sh
-# ./scripts/talk-producer-mxl.sh
+"$NVNMOS/rust/gst-nmos-rs/scripts/talk-producer-udp.sh"
+# "$NVNMOS/rust/gst-nmos-rs/scripts/talk-producer-mxl.sh"
 ```
 
 **Terminal 2**
 
 ```sh
-./scripts/talk-consumer-udp.sh
-# ./scripts/talk-consumer-mxl.sh
+"$NVNMOS/rust/gst-nmos-rs/scripts/talk-consumer-udp.sh"
+# "$NVNMOS/rust/gst-nmos-rs/scripts/talk-consumer-mxl.sh"
 ```
 
 **Terminal 3**
 
 ```sh
-./scripts/talk-transformer-udp.sh
-# ./scripts/talk-transformer-mxl.sh
+"$NVNMOS/rust/gst-nmos-rs/scripts/talk-transformer-udp.sh"
+# "$NVNMOS/rust/gst-nmos-rs/scripts/talk-transformer-mxl.sh"
 ```
 
 ## During the five minutes
