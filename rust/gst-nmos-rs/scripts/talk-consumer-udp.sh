@@ -26,7 +26,7 @@ fi
 exec gst-launch-1.0 -e \
     nmossrc \
         node-seed=talk-consumer \
-        node-properties="properties,label=consumer" \
+        node-properties="properties,label=consumer-udp" \
         domain=local \
         receiver-name=video2 \
         multicast-ip=232.99.99.1 \
@@ -35,7 +35,7 @@ exec gst-launch-1.0 -e \
         source-ip="$DEMO_NIC_IP" \
         transport-properties="properties,buffer-size=16777216" \
         caps="video/x-raw,format=UYVP,width=1920,height=1080,framerate=25/1,interlace-mode=progressive" \
-        label="consumer in" \
+        label="consumer-udp in" \
         auto-activate=true ! \
     queue leaky=downstream max-size-buffers=2 max-size-bytes=0 max-size-time=0 ! \
     videoconvert ! autovideosink sync=false

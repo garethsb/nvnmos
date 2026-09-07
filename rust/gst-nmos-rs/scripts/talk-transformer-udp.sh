@@ -26,13 +26,13 @@ fi
 exec gst-launch-1.0 -e \
     nmossrc \
         node-seed=example-transformer \
-        node-properties="properties,label=transformer" \
+        node-properties="properties,label=transformer-udp" \
         domain=local \
         receiver-name=in \
         interface-ip="$DEMO_NIC_IP" \
         transport-properties="properties,buffer-size=16777216" \
         caps="video/x-raw,format=UYVP,width=1920,height=1080,framerate=25/1,interlace-mode=progressive" \
-        label="transformer in" ! \
+        label="transformer-udp in" ! \
     queue leaky=downstream max-size-buffers=2 max-size-bytes=0 max-size-time=0 ! \
     identity ! \
     videoconvert ! \
@@ -43,10 +43,10 @@ exec gst-launch-1.0 -e \
     gdkpixbufoverlay location="$(dirname "$0")/../images/nvidia-logo-vert.svg" overlay-width=480 overlay-height=270 offset-x=240 offset-y=0 ! \
     nmossink \
         node-seed=example-transformer \
-        node-properties="properties,label=transformer" \
+        node-properties="properties,label=transformer-udp" \
         domain=local \
         sender-name=out \
         source-ip="$DEMO_NIC_IP" \
         transport-properties="properties,buffer-size=16777216" \
         caps="video/x-raw,format=UYVP,width=1920,height=1080,framerate=25/1,interlace-mode=progressive" \
-        label="transformer out"
+        label="transformer-udp out"
