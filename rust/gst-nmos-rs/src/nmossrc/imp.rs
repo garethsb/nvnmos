@@ -548,7 +548,64 @@ impl ElementImpl for NmosSrc {
     }
 }
 
-impl BinImpl for NmosSrc {}
+impl BinImpl for NmosSrc {
+    fn handle_message(&self, message: gst::Message) {
+        let gst::MessageView::Error(error) = message.view() else {
+            self.parent_handle_message(message);
+            return;
+        };
+        let Some(source) = message.src().cloned() else {
+            self.parent_handle_message(message);
+            return;
+        };
+        let from_current_chain = self
+            .ghost
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|ghost| inner::source_is_in_current_chain(ghost, &source));
+        if !from_current_chain {
+            self.parent_handle_message(message);
+            return;
+        }
+
+        let debug = error.debug().map(|debug| debug.to_owned());
+        let details = error.details().map(|details| details.to_owned());
+        let glib_error = error.error();
+        self.obj().call_async(move |src| {
+            let imp = src.imp();
+            if imp
+                .ghost
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|ghost| inner::source_is_in_current_chain(ghost, &source))
+            {
+                let settings = imp.settings.lock().unwrap().clone();
+                match build_fake_src_for_settings(&settings).and_then(|fake| {
+                    imp.swap_inner(src.upcast_ref(), &fake, inner::RebuildChainOpts::default())
+                }) {
+                    Ok(()) => gst::warning!(
+                        CAT,
+                        "nmossrc inner chain posted ERROR; restored fake chain: {glib_error}"
+                    ),
+                    Err(restore_error) => gst::warning!(
+                        CAT,
+                        "nmossrc inner chain posted ERROR and fake-chain restore failed: \
+                         {restore_error:#}; original error: {glib_error}"
+                    ),
+                }
+            }
+
+            let warning = gst::message::Warning::builder_from_error(glib_error)
+                .debug_if_some(debug.as_deref())
+                .details_if_some(details)
+                .src(src)
+                .build();
+            let _ = src.post_message(warning);
+        });
+    }
+}
 
 impl NmosSrc {
     // Locks `settings`; must not be called while that mutex is held.
@@ -1490,5 +1547,41 @@ mod tests {
             intermediate_fake_src_caps(&plan, &snapshot).expect("fake plan"),
             Some(caps),
         );
+    }
+
+    #[test]
+    fn inner_error_restores_fake_chain_without_bus_error() {
+        init_gst();
+        let pipeline = gst::Pipeline::new();
+        let src = glib::Object::new::<crate::nmossrc::NmosSrc>();
+        pipeline.add(&src).expect("add nmossrc");
+        let real = gst::ElementFactory::make("fakesrc")
+            .name("test-real-src")
+            .build()
+            .expect("real src");
+        src.imp()
+            .swap_inner(src.upcast_ref(), &real, inner::RebuildChainOpts::default())
+            .expect("install real src");
+        assert!(src.imp().current_chain_is_real());
+
+        real.post_message(
+            gst::message::Error::builder(gst::CoreError::Failed, "test inner failure")
+                .src(&real)
+                .build(),
+        )
+        .expect("post inner error");
+
+        let bus = pipeline.bus().expect("pipeline bus");
+        let message = bus
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(2),
+                &[gst::MessageType::Error, gst::MessageType::Warning],
+            )
+            .expect("inner error must produce a warning");
+        assert!(
+            matches!(message.view(), gst::MessageView::Warning(_)),
+            "inner error escaped the bin: {message:?}",
+        );
+        assert!(!src.imp().current_chain_is_real());
     }
 }

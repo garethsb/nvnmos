@@ -186,6 +186,8 @@ pub(crate) fn rebuild_chain_with_opts(
         flush_external_of_ghost(cat, ghost);
     }
 
+    release_fake_sink_clock_wait(cat, ghost);
+
     let probe_id =
         block_and_wait(cat, &probe_pad).context("blocking anchor pad before chain rebuild")?;
 
@@ -592,6 +594,27 @@ fn parent_target_state(bin: &gst::Bin) -> gst::State {
     }
 }
 
+fn current_chain(ghost: &gst::GhostPad) -> Option<gst::Element> {
+    let anchor_outer_pad = ghost.target()?;
+    let anchor = anchor_outer_pad.parent_element()?;
+    if anchor.name() != ANCHOR_NAME {
+        return None;
+    }
+    let link_pad_name = match ghost.direction() {
+        gst::PadDirection::Sink => "src",
+        gst::PadDirection::Src => "sink",
+        _ => return None,
+    };
+    anchor.static_pad(link_pad_name)?.peer()?.parent_element()
+}
+
+/// True when `source` is the current inner chain or one of its children.
+pub(crate) fn source_is_in_current_chain(ghost: &gst::GhostPad, source: &gst::Object) -> bool {
+    current_chain(ghost).is_some_and(|chain| {
+        source == chain.upcast_ref::<gst::Object>() || source.has_as_ancestor(&chain)
+    })
+}
+
 /// True iff the bin's current inner chain is a *real* chain (a
 /// real transport element such as `mxlsink` / `mxlsrc`, identified
 /// by the absence of the `-fake` suffix on its element name) — as
@@ -613,30 +636,37 @@ fn parent_target_state(bin: &gst::Bin) -> gst::State {
 /// re-open so the new real chain's start-up (`mxlsrc.start()` /
 /// `mxlsink.set_caps()` for MXL) sees a clean transport state.
 pub(crate) fn current_chain_is_real(ghost: &gst::GhostPad) -> bool {
-    let Some(anchor_outer_pad) = ghost.target() else {
-        return false;
-    };
-    let Some(anchor) = anchor_outer_pad.parent_element() else {
-        return false;
-    };
-    if anchor.name() != ANCHOR_NAME {
-        return false;
+    current_chain(ghost).is_some_and(|chain| !chain.name().ends_with("-fake"))
+}
+
+/// Stop an outgoing fake sink from waiting on a future timestamp so its
+/// anchor pad can become idle. This changes only the fake chain that is
+/// about to be removed; real transport sinks keep clock synchronization.
+fn release_fake_sink_clock_wait(cat: &gst::DebugCategory, ghost: &gst::GhostPad) {
+    if ghost.direction() != gst::PadDirection::Sink {
+        return;
     }
-    let link_pad_name = match ghost.direction() {
-        gst::PadDirection::Sink => "src",
-        gst::PadDirection::Src => "sink",
-        _ => return false,
+    let Some(chain) = current_chain(ghost).filter(|chain| chain.name().ends_with("-fake")) else {
+        return;
     };
-    let Some(link_pad) = anchor.static_pad(link_pad_name) else {
-        return false;
-    };
-    let Some(chain_pad) = link_pad.peer() else {
-        return false;
-    };
-    let Some(chain) = chain_pad.parent_element() else {
-        return false;
-    };
-    !chain.name().ends_with("-fake")
+    let sink = chain
+        .downcast_ref::<gst::Bin>()
+        .and_then(|bin| bin.by_name("nmossink-fake-sink"))
+        .unwrap_or(chain);
+    gst::debug!(
+        cat,
+        "rebuild_chain: interrupting clock wait on outgoing fake sink `{}`",
+        sink.name(),
+    );
+    // Flipping `sync` does not unschedule an in-flight GstBaseSink wait,
+    // and PLAYING→PAUSED would take the stream lock and block on it.
+    // FLUSH_START on the sink pad is the normal way to unblock from this
+    // thread. No FLUSH_STOP: that event is serialized, and stop_chain
+    // takes this fake to Null immediately after.
+    sink.set_property("sync", false);
+    if let Some(pad) = sink.static_pad("sink") {
+        let _ = pad.send_event(gst::event::FlushStart::new());
+    }
 }
 
 /// Build the `nmossink` fake chain: a `fakesink`, optionally preceded
@@ -3459,6 +3489,71 @@ mod tests {
 
         rebuild_chain(cat, &nmos_bin, &ghost, &sync_sink, "sink")
             .expect("async=false inner must swap while PLAYING");
+
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    #[test]
+    fn rebuild_chain_interrupts_fake_sink_clock_wait() {
+        init_gst();
+        let cat = test_log_cat();
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("appsrc")
+            .property("is-live", true)
+            .property("format", gst::Format::Time)
+            .build()
+            .expect("appsrc");
+        let nmos_bin = gst::Bin::with_name("nmossink-sim");
+        let initial = build_fake_sink(None).expect("initial fake sink");
+        let (buffer_seen_tx, buffer_seen_rx) = std::sync::mpsc::channel();
+        initial
+            .static_pad("sink")
+            .expect("fake sink pad")
+            .add_probe(gst::PadProbeType::BUFFER, move |_pad, _info| {
+                let _ = buffer_seen_tx.send(());
+                gst::PadProbeReturn::Ok
+            })
+            .expect("buffer probe");
+        let ghost = build_initial(&nmos_bin, initial, "sink", gst::PadDirection::Sink)
+            .expect("build_initial");
+        nmos_bin.add_pad(&ghost).expect("add ghost pad");
+        let nmos_elem: &gst::Element = nmos_bin.upcast_ref();
+        pipeline
+            .add_many([&src, nmos_elem])
+            .expect("add pipeline children");
+        src.link_pads(Some("src"), &nmos_bin, Some("sink"))
+            .expect("link appsrc to nmossink ghost");
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline -> PLAYING");
+        let (_ret, state, _pending) = pipeline.state(gst::ClockTime::from_seconds(5));
+        assert_eq!(state, gst::State::Playing, "pipeline must reach PLAYING");
+
+        let mut buffer = gst::Buffer::with_size(1).expect("buffer");
+        buffer
+            .get_mut()
+            .expect("writable buffer")
+            .set_pts(gst::ClockTime::from_seconds(30));
+        src.downcast_ref::<gstreamer_app::AppSrc>()
+            .expect("appsrc type")
+            .push_buffer(buffer)
+            .expect("push future-dated buffer");
+        buffer_seen_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("buffer must reach the fake sink");
+        // BUFFER probe runs just before GstBaseSink creates its clock id.
+        // FLUSH_START only unschedules a wait that already exists.
+        std::thread::sleep(Duration::from_millis(10));
+
+        let replacement = fakesink_for_rebuild_test("inner-replacement", false);
+        let started = std::time::Instant::now();
+        rebuild_chain(cat, &nmos_bin, &ghost, &replacement, "sink")
+            .expect("swap must interrupt the fake sink's clock wait");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "rebuild_chain waited out the 30s timestamp instead of interrupting it ({:?})",
+            started.elapsed(),
+        );
 
         let _ = pipeline.set_state(gst::State::Null);
     }
