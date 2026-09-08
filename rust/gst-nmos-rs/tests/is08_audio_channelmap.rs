@@ -40,10 +40,17 @@ fn audio_caps(channels: i32) -> gst::Caps {
 }
 
 fn make_appsrc(name: &str, channels: i32) -> gst_app::AppSrc {
+    // `is-live: true` means the source returns NO_PREROLL, so sinks need no
+    // first buffer and PAUSED completes with nothing pushed. The fixation
+    // tests inspect the element at PAUSED and never push.
+    make_appsrc_opts(name, channels, true)
+}
+
+fn make_appsrc_opts(name: &str, channels: i32, is_live: bool) -> gst_app::AppSrc {
     gst::ElementFactory::make("appsrc")
         .name(name)
         .property("format", gst::Format::Time)
-        .property("is-live", true)
+        .property("is-live", is_live)
         .property("block", false)
         .property("caps", audio_caps(channels))
         .build()
@@ -53,9 +60,16 @@ fn make_appsrc(name: &str, channels: i32) -> gst_app::AppSrc {
 }
 
 fn make_appsink(channels: i32) -> gst_app::AppSink {
-    // drop=true: keep only the newest buffer. pull_mono drains and upstream
-    // queues refill; a deeper appsink queue is unnecessary for these tests.
+    // `drop: true` and `max-buffers: 1` keep only the newest buffer. The
+    // fixation tests never pull a measure window.
     make_appsink_opts(channels, true, 1)
+}
+
+fn make_measure_appsink() -> gst_app::AppSink {
+    // `drop: false` and `max-buffers: 2 + MEASURE_FRAMES` keep the preroll
+    // buffers plus one full measure window; `drop: true` would discard that
+    // window while pull_mono is still draining it.
+    make_appsink_opts(1, false, (2 + MEASURE_FRAMES) as u32)
 }
 
 fn make_appsink_opts(channels: i32, drop: bool, max_buffers: u32) -> gst_app::AppSink {
@@ -134,9 +148,10 @@ fn pull_mono(appsink: &gst_app::AppSink, frames: usize) -> Vec<f32> {
         }
     }
     assert!(
-        mono.len() >= FRAME_SAMPLES,
-        "insufficient samples (got {})",
-        mono.len()
+        mono.len() >= frames * FRAME_SAMPLES,
+        "timed out with {} of {} samples",
+        mono.len(),
+        frames * FRAME_SAMPLES
     );
     mono
 }
@@ -191,18 +206,24 @@ fn post_is08_activation(http_port: u16, body: &str) {
     );
 }
 
-fn wait_paused(pipeline: &gst::Pipeline) {
-    // Reach PAUSED first so nmosaudiochannelmap fixation can finish without
-    // needing buffers (live appsrcs will not complete PLAYING until fed).
-    if pipeline.set_state(gst::State::Paused).is_err() {
+fn set_state(pipeline: &gst::Pipeline, want: gst::State) {
+    if pipeline.set_state(want).is_err() {
         dump_pipeline_errors(pipeline);
-        panic!("set_state(Paused) failed");
+        panic!("set_state({want:?}) failed");
     }
+}
+
+fn await_state(pipeline: &gst::Pipeline, want: gst::State) {
     let (ret, state, pending) = pipeline.state(gst::ClockTime::from_seconds(10));
-    if ret.is_err() || state != gst::State::Paused || pending != gst::State::VoidPending {
+    if ret.is_err() || state != want || pending != gst::State::VoidPending {
         dump_pipeline_errors(pipeline);
-        panic!("pipeline not PAUSED after wait: ret={ret:?} state={state:?} pending={pending:?}");
+        panic!("pipeline not {want:?} after wait: ret={ret:?} state={state:?} pending={pending:?}");
     }
+}
+
+fn wait_paused(pipeline: &gst::Pipeline) {
+    set_state(pipeline, gst::State::Paused);
+    await_state(pipeline, gst::State::Paused);
 }
 
 /// Like [`wait_paused`], but returns whether PAUSED was reached cleanly.
@@ -215,17 +236,15 @@ fn try_wait_paused(pipeline: &gst::Pipeline) -> bool {
 }
 
 fn wait_playing(pipeline: &gst::Pipeline) {
-    // Callers should push at least one buffer before waiting: live appsrcs keep
-    // PAUSED→PLAYING async until data arrives.
-    if pipeline.set_state(gst::State::Playing).is_err() {
-        dump_pipeline_errors(pipeline);
-        panic!("set_state(Playing) failed");
-    }
-    let (ret, state, pending) = pipeline.state(gst::ClockTime::from_seconds(10));
-    if ret.is_err() || state != gst::State::Playing || pending != gst::State::VoidPending {
-        dump_pipeline_errors(pipeline);
-        panic!("pipeline not PLAYING after wait: ret={ret:?} state={state:?} pending={pending:?}");
-    }
+    set_state(pipeline, gst::State::Playing);
+    await_state(pipeline, gst::State::Playing);
+}
+
+/// Non-live appsrcs need a preroll buffer before PAUSED completes.
+fn preroll_paused(pipeline: &gst::Pipeline, a: &gst_app::AppSrc, b: &gst_app::AppSrc) {
+    set_state(pipeline, gst::State::Paused);
+    push_lockstep(a, b, 0, 2);
+    await_state(pipeline, gst::State::Paused);
 }
 
 fn dump_pipeline_errors(pipeline: &gst::Pipeline) {
@@ -257,7 +276,7 @@ fn dump_pipeline_errors(pipeline: &gst::Pipeline) {
 /// Default identity routes `src_0` from `input0` (tone A). An immediate IS-08
 /// activation then remaps it to `input1` (tone B) on the same output.
 #[test]
-fn is08_audio_channelmap_live_reroute_swaps_tone() {
+fn is08_audio_channelmap_reroute_while_playing_swaps_tone() {
     init();
     if let Some(why) = nvnmosd_skip_reason() {
         skip!(why);
@@ -277,13 +296,14 @@ fn is08_audio_channelmap_live_reroute_swaps_tone() {
         .expect("temp socket")
         .into_temp_path();
     let daemon = DaemonGuard::new(socket.to_path_buf());
-    // In-band IS-08 needs a known listen port; reserve one like lock_ordering
-    // does for IS-05 PATCH (http-port=0 is preferred when the port is unused).
+    // This test POSTs an IS-08 activation, so it needs a known listen port.
+    // Other tests leave `http-port` at 0.
     let http_port = ephemeral_http_port();
 
     let pipeline = gst::Pipeline::default();
-    let src_a = make_appsrc("tone-a", 1);
-    let src_b = make_appsrc("tone-b", 1);
+    // Non-live so the mixer follows data, not the pipeline clock.
+    let src_a = make_appsrc_opts("tone-a", 1, false);
+    let src_b = make_appsrc_opts("tone-b", 1, false);
     let cf_a = gst::ElementFactory::make("capsfilter")
         .property("caps", audio_caps(1))
         .build()
@@ -309,7 +329,7 @@ fn is08_audio_channelmap_live_reroute_swaps_tone() {
     sink1.set_property("channels", 1u32);
     src0.set_property("output-id", "output0");
     src0.set_property("channels", 1u32);
-    let out = make_appsink(1);
+    let out = make_measure_appsink();
 
     pipeline
         .add_many([
@@ -334,8 +354,7 @@ fn is08_audio_channelmap_live_reroute_swaps_tone() {
     src0.link(&out.static_pad("sink").unwrap())
         .expect("link out");
 
-    wait_paused(&pipeline);
-    push_lockstep(&src_a, &src_b, 0, 2);
+    preroll_paused(&pipeline, &src_a, &src_b);
     wait_playing(&pipeline);
 
     // Default identity: output0 <- input0 (tone A).
@@ -353,21 +372,12 @@ fn is08_audio_channelmap_live_reroute_swaps_tone() {
 
     // Drop pre-activation buffers, push a fresh window, expect tone B.
     while out.try_pull_sample(gst::ClockTime::ZERO).is_some() {}
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let mut idx = (2 + MEASURE_FRAMES) as u64;
-    let samples = loop {
-        assert!(
-            Instant::now() < deadline,
-            "re-route did not yield tone B within timeout"
-        );
-        push_lockstep(&src_a, &src_b, idx, MEASURE_FRAMES);
-        idx += MEASURE_FRAMES as u64;
-        let samples = pull_mono(&out, MEASURE_FRAMES);
-        if Tone::High.dominant_in(&samples, SAMPLE_RATE as f32) {
-            break samples;
-        }
-    };
-    assert_tone("after re-route", &samples, Tone::High);
+    push_lockstep(&src_a, &src_b, (2 + MEASURE_FRAMES) as u64, MEASURE_FRAMES);
+    assert_tone(
+        "after re-route",
+        &pull_mono(&out, MEASURE_FRAMES),
+        Tone::High,
+    );
 
     let _ = pipeline.set_state(gst::State::Null);
 }
@@ -422,8 +432,9 @@ fn is08_audio_channelmap_static_map_first_window_isolates_tones() {
         let daemon = DaemonGuard::new(socket.to_path_buf());
 
         let pipeline = gst::Pipeline::default();
-        let src_a = make_appsrc("tone-a", 1);
-        let src_b = make_appsrc("tone-b", 1);
+        // Non-live so the mixer follows data, not the pipeline clock.
+        let src_a = make_appsrc_opts("tone-a", 1, false);
+        let src_b = make_appsrc_opts("tone-b", 1, false);
         let cf_a = gst::ElementFactory::make("capsfilter")
             .property("caps", audio_caps(1))
             .build()
@@ -453,9 +464,8 @@ fn is08_audio_channelmap_static_map_first_window_isolates_tones() {
         src1.set_property("channels", 1u32);
         src0.set_property("active-map", active_map(case.src0_map));
         src1.set_property("active-map", active_map(case.src1_map));
-        // Keep the startup window: drop=false and room for prime + measure pushes.
-        let out0 = make_appsink_opts(1, false, (2 + MEASURE_FRAMES) as u32);
-        let out1 = make_appsink_opts(1, false, (2 + MEASURE_FRAMES) as u32);
+        let out0 = make_measure_appsink();
+        let out1 = make_measure_appsink();
 
         pipeline
             .add_many([
@@ -475,8 +485,7 @@ fn is08_audio_channelmap_static_map_first_window_isolates_tones() {
         src0.link(&out0.static_pad("sink").unwrap()).unwrap();
         src1.link(&out1.static_pad("sink").unwrap()).unwrap();
 
-        wait_paused(&pipeline);
-        push_lockstep(&src_a, &src_b, 0, 2);
+        preroll_paused(&pipeline, &src_a, &src_b);
         wait_playing(&pipeline);
         push_lockstep(&src_a, &src_b, 2, MEASURE_FRAMES);
 
