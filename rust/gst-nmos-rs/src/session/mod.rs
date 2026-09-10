@@ -620,24 +620,26 @@ pub(crate) enum TransportConfig {
         format: FlowFormat,
         /// Resolved `flow_def` JSON (when one is in play, whether
         /// supplied via `transport-file*` or synthesised from `caps`).
-        /// Receivers reverse-map this into essence Caps and pin them
+        /// Receivers reverse-map this into essence caps and pin them
         /// on the ghost source pad so downstream caps queries see
         /// the concrete shape the flow will carry (rather than the
-        /// broad `mxlsrc` pad template). Senders ignore it. `None`
-        /// only when neither a transport file nor a synthesise-able
+        /// broad `mxlsrc` template).
+        /// Senders pin the same essence on the sink chain with a
+        /// capsfilter.
+        /// `None` only when neither a transport file nor a synthesizable
         /// caps + `mxl-flow-id` pairing was supplied at NULL→READY
         /// (e.g. deferred-mode Senders awaiting peer caps, or
         /// Receivers whose `mxl-flow-id` will arrive via IS-05 PATCH).
         transport_file: Option<String>,
     },
-    /// RTP/UDP transport. The inner chain is `rtp*pay ! udpsink` for
-    /// senders and `udpsrc ! rtp*depay [! capssetter(caps)]` for
-    /// receivers.
+    /// RTP/UDP transport. The inner chain is
+    /// `capsfilter ! rtp*pay ! udpsink` for senders and
+    /// `udpsrc ! rtp*depay [! capssetter(caps)]` for receivers.
     /// Unconstrained receivers (activation SDP carries `a=x-nvnmos-caps:`)
     /// omit `capssetter`; constrained receivers pass configuring essence
     /// caps parsed from the transport file to the chain builder, which
-    /// appends a capssetter only for depayloaders that need/tolerate
-    /// one. The exact element factory names dispatch on [`UdpVariant`].
+    /// appends a capssetter except when the depayloader already produces
+    /// complete output caps. Element factories dispatch on [`UdpVariant`].
     ///
     /// Constructed at runtime by `resolve_inner_config_udp` (in
     /// `validate_and_open`) and `decide_inner_config_udp` (in
@@ -657,10 +659,10 @@ pub(crate) enum TransportConfig {
         /// logical RTP stream in [`udp::types::UdpMedia`] (not raw SDP).
         transport_file: Option<String>,
     },
-    /// DeepStream Rivermax transport. Inner chain is a bare
-    /// `nvdsudpsink` / `nvdsudpsrc` in Mode 3 (built-in RTP
-    /// packetization / depacketization; no external `rtp*pay` /
-    /// `rtp*depay`).
+    /// DeepStream Rivermax transport. Inner chain is
+    /// `capsfilter ! nvdsudpsink` / `nvdsudpsrc` in Mode 3
+    /// (built-in RTP packetization / depacketization; no external
+    /// `rtp*pay` / `rtp*depay`).
     NvDsUdp {
         media: udp::types::UdpMedia,
         transport_file: Option<String>,

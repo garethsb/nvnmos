@@ -15,15 +15,14 @@
 //!   sinks, `appsrc` for sources, both idle in PLAYING), or
 //! * a **real chain** for the selected transport once enough
 //!   configuration is pinned to instantiate it:
-//!   * **MXL** — `mxlsink` on the sink side; on the source side a
-//!     sub-bin wrapping `mxlsrc ! capssetter` when advertise-caps
-//!     are known ([`build_mxlsink`] / [`build_mxlsrc`]).
-//!   * **UDP** (`udp` / `udp2`) — `rtp*pay ! udpsink` on the sink
-//!     side; `udpsrc ! rtp*depay` (optionally followed by
-//!     `capssetter` on the source side) ([`build_udpsink`] /
-//!     [`build_udpsrc`]).
-//!   * **nvdsudp** — DeepStream `nvdsudpsink` / `nvdsudpsrc`
-//!     ([`build_nvdsudpsink`] / [`build_nvdsudpsrc`]).
+//!   * **MXL** — `capsfilter ! mxlsink` on the sink side; on the
+//!     source side a sub-bin wrapping `mxlsrc ! capssetter` when
+//!     advertise-caps are known ([`build_mxlsink`] / [`build_mxlsrc`]).
+//!   * **UDP** (`udp` / `udp2`) — `capsfilter ! rtp*pay ! udpsink`
+//!     on the sink side; `udpsrc ! rtp*depay [! capssetter]` on the
+//!     source side ([`build_udpsink`] / [`build_udpsrc`]).
+//!   * **nvdsudp** — `capsfilter ! nvdsudpsink` /
+//!     `nvdsudpsrc` ([`build_nvdsudpsink`] / [`build_nvdsudpsrc`]).
 //!
 //! The swap mechanics here are transport-agnostic; each factory
 //! returns a chain element (or small bin) whose sink/src pad is
@@ -754,14 +753,11 @@ pub(crate) fn build_fake_src(caps: Option<&gst::Caps>) -> Result<gst::Element, a
     Ok(elem)
 }
 
-/// Build the inner `mxlsink` for `nmossink`. Fails with a clear
-/// message if the `mxl` plugin isn't on `GST_PLUGIN_PATH` or the
-/// element factory rejects the supplied properties.
 #[derive(Debug)]
 pub(crate) struct MxlSinkChain {
-    /// Inner `mxlsink` added directly to the outer bin (same object as [`Self::bin`]).
+    /// Wrapper bin added to the outer bin (`capsfilter ! mxlsink`).
     pub bin: gst::Element,
-    /// Same element as [`Self::bin`].
+    /// Inner `mxlsink` inside [`Self::bin`].
     pub transport: gst::Element,
 }
 
@@ -796,10 +792,9 @@ pub(crate) struct UdpSrcChain {
 
 #[derive(Debug)]
 pub(crate) struct NvDsUdpSinkChain {
-    /// Wrapper added to the outer bin: the bare `nvdsudpsink`, or (for ST-2038)
-    /// a sub-bin wrapping `capsfilter ! nvdsudpsink` that pins `alignment=frame`.
+    /// Wrapper bin added to the outer bin (`capsfilter ! nvdsudpsink`).
     pub bin: gst::Element,
-    /// Inner `nvdsudpsink` (same object as [`Self::bin`] unless wrapped).
+    /// Inner `nvdsudpsink` inside [`Self::bin`].
     pub transport: gst::Element,
 }
 
@@ -811,9 +806,53 @@ pub(crate) struct NvDsUdpSrcChain {
     pub transport: gst::Element,
 }
 
+/// Prepend a capsfilter that pins `caps` and expose it as `bin`'s
+/// `sink` pad, in front of `next`. Same helper for MXL, RTP/UDP, and
+/// nvdsudp so a fake→real swap cannot drop advertised fields or
+/// features.
+fn prepend_sink_capsfilter(
+    bin: &gst::Bin,
+    next: &gst::Element,
+    caps: &gst::Caps,
+) -> Result<(), anyhow::Error> {
+    let capsfilter = gst::ElementFactory::make("capsfilter")
+        .name("nmossink-caps")
+        .property("caps", caps)
+        .build()
+        .context("creating capsfilter to pin advertised sink essence")?;
+    bin.add(&capsfilter)
+        .map_err(|e| anyhow!("adding essence capsfilter: {e}"))?;
+    capsfilter
+        .link(next)
+        .context("linking essence capsfilter to inner sink chain")?;
+    let sink_pad = capsfilter
+        .static_pad("sink")
+        .ok_or_else(|| anyhow!("essence capsfilter missing sink pad"))?;
+    let ghost = gst::GhostPad::builder(gst::PadDirection::Sink)
+        .name("sink")
+        .build();
+    ghost
+        .set_target(Some(&sink_pad))
+        .map_err(|e| anyhow!("setting inner ghost sink target: {e}"))?;
+    ghost
+        .set_active(true)
+        .map_err(|e| anyhow!("activating inner ghost sink: {e}"))?;
+    bin.add_pad(&ghost)
+        .map_err(|e| anyhow!("adding ghost sink to inner bin: {e}"))?;
+    Ok(())
+}
+
+/// Build the inner `mxlsink` for `nmossink`. Fails with a clear
+/// message if the `mxl` plugin isn't on `GST_PLUGIN_PATH` or the
+/// element factory rejects the supplied properties.
+///
+/// `advertise_caps` is the configuring `flow_def` essence (features
+/// overlaid from the `caps` property). It is pinned with the same
+/// sink-side capsfilter used by the RTP/UDP and nvdsudp chains.
 pub(crate) fn build_mxlsink(
     domain_path: &str,
     flow_id: &str,
+    advertise_caps: &gst::Caps,
 ) -> Result<MxlSinkChain, anyhow::Error> {
     require_mxl_factory("mxlsink")?;
     let mxlsink = gst::ElementFactory::make("mxlsink")
@@ -824,8 +863,12 @@ pub(crate) fn build_mxlsink(
         .with_context(|| {
             format!("instantiating `mxlsink` with domain={domain_path:?}, flow-id={flow_id}")
         })?;
+    let bin = gst::Bin::with_name("nmossink-mxl");
+    bin.add(&mxlsink)
+        .map_err(|e| anyhow!("adding mxlsink to inner bin: {e}"))?;
+    prepend_sink_capsfilter(&bin, &mxlsink, advertise_caps)?;
     Ok(MxlSinkChain {
-        bin: mxlsink.clone(),
+        bin: bin.upcast(),
         transport: mxlsink,
     })
 }
@@ -1064,21 +1107,7 @@ pub(crate) fn build_udpsink(
     payloader
         .link(&udpsink)
         .with_context(|| "linking payloader to udpsink")?;
-
-    let payloader_sink = payloader
-        .static_pad("sink")
-        .ok_or_else(|| anyhow!("payloader `{payloader_factory}` missing sink pad"))?;
-    let ghost = gst::GhostPad::builder(gst::PadDirection::Sink)
-        .name("sink")
-        .build();
-    ghost
-        .set_target(Some(&payloader_sink))
-        .map_err(|e| anyhow!("setting inner ghost sink target: {e}"))?;
-    ghost
-        .set_active(true)
-        .map_err(|e| anyhow!("activating inner ghost sink: {e}"))?;
-    bin.add_pad(&ghost)
-        .map_err(|e| anyhow!("adding ghost sink to inner bin: {e}"))?;
+    prepend_sink_capsfilter(&bin, &payloader, &media.caps)?;
 
     Ok(UdpSinkChain {
         bin: bin.upcast(),
@@ -1620,53 +1649,19 @@ pub(crate) fn build_nvdsudpsink(
     // drop this chain struct — keep the temp file on the GstObject.
     SdpFileGuard::attach_to_element(&sink, sdp_file);
 
-    // `nvdsudpsink`'s sink pad template is `ANY` (see gst-nvdsudp), so on its
-    // own it neither advertises nor rejects the per-frame ST-2038 grouping its
-    // Mode-3 ANC path assumes — a `packet`/`line` peer would be accepted and
-    // silently mis-packetized. `mxlsink` and `rtpsmpte291pay` get this from their
-    // real sink templates; for ANC we restore parity by standing in for the
-    // missing template with a `capsfilter`. Pin exactly what those templates pin
-    // — `meta/x-st-2038, alignment=frame`, nothing more — so it rejects a
-    // non-`frame` peer and fixates an alignment-less one without constraining
-    // framerate (which negotiates freely, as it does through their templates).
-    // Drop this if `nvdsudpsink` ever grows a real sink template.
-    if media.format == FlowFormat::Data {
-        let filter_caps = gst::Caps::builder("meta/x-st-2038")
-            .field("alignment", "frame")
-            .build();
-        let capsfilter = gst::ElementFactory::make("capsfilter")
-            .name("nmossink-nvdsudp-anc-align")
-            .property("caps", filter_caps)
-            .build()
-            .with_context(|| "instantiating `capsfilter` for nvdsudp ANC alignment")?;
-        let bin = gst::Bin::with_name("nmossink-nvdsudp");
-        bin.add_many([&capsfilter, &sink])
-            .map_err(|e| anyhow!("adding capsfilter + nvdsudpsink to inner bin: {e}"))?;
-        capsfilter
-            .link(&sink)
-            .with_context(|| "linking capsfilter to nvdsudpsink")?;
-        let cf_sink = capsfilter
-            .static_pad("sink")
-            .ok_or_else(|| anyhow!("capsfilter missing sink pad"))?;
-        let ghost = gst::GhostPad::builder(gst::PadDirection::Sink)
-            .name("sink")
-            .build();
-        ghost
-            .set_target(Some(&cf_sink))
-            .map_err(|e| anyhow!("setting inner ghost sink target: {e}"))?;
-        ghost
-            .set_active(true)
-            .map_err(|e| anyhow!("activating inner ghost sink: {e}"))?;
-        bin.add_pad(&ghost)
-            .map_err(|e| anyhow!("adding ghost sink to inner bin: {e}"))?;
-        return Ok(NvDsUdpSinkChain {
-            bin: bin.upcast(),
-            transport: sink,
-        });
-    }
-
+    // `nvdsudpsink`'s sink pad template is `ANY`. Pin advertised
+    // essence like the MXL and RTP/UDP sink chains, after filling
+    // ST-2038 `alignment=frame` that those templates already carry.
+    let bin = gst::Bin::with_name("nmossink-nvdsudp");
+    bin.add(&sink)
+        .map_err(|e| anyhow!("adding nvdsudpsink to inner bin: {e}"))?;
+    prepend_sink_capsfilter(
+        &bin,
+        &sink,
+        &packetization::with_st2038_frame_alignment(&media.caps),
+    )?;
     Ok(NvDsUdpSinkChain {
-        bin: sink.clone(),
+        bin: bin.upcast(),
         transport: sink,
     })
 }
@@ -1704,21 +1699,11 @@ pub(crate) fn build_nvdsudpsrc(
     sdp_text: &str,
 ) -> Result<NvDsUdpSrcChain, anyhow::Error> {
     require_nvdsudp_factory("nvdsudpsrc")?;
-    // ST-2038 essence caps carry no `alignment` (a buffer-grouping detail, not a
-    // transport property), but `nvdsudpsrc`'s src pad is `ANY` and can't advertise
-    // the per-frame grouping DeepStream's Mode-3 ANC path produces. Stamp `frame`
-    // onto the output caps so a downstream `st2038combiner` (which requires the
-    // field) sees it — the src-side mirror of the `capsfilter` `build_nvdsudpsink`
-    // inserts. Add only when absent; an explicit non-`frame` is left for
-    // `from_media`/`anc_from_caps` to reject rather than silently relabel.
-    let mut caps = media.caps.clone();
-    if media.format == FlowFormat::Data
-        && let Some(s) = caps.make_mut().structure_mut(0)
-        && s.name() == "meta/x-st-2038"
-        && s.get::<&str>("alignment").is_err()
-    {
-        s.set("alignment", "frame");
-    }
+    // `nvdsudpsrc`'s src pad is `ANY` and can't advertise the per-frame
+    // grouping Mode 3 produces. Fill `alignment=frame` so a downstream
+    // `st2038combiner` sees it — the src-side counterpart of the same
+    // default `build_nvdsudpsink` applies before the shared sink capsfilter.
+    let caps = packetization::with_st2038_frame_alignment(&media.caps);
     let pkt = packetization::from_media(media.format, &caps, &media.rtp_caps)?;
 
     let src = if let Some(secondary) = &media.secondary {
@@ -2172,6 +2157,94 @@ mod tests {
         assert!(chain.static_pad("sink").is_some());
     }
 
+    fn mxl_advertise_caps() -> gst::Caps {
+        gst::Caps::from_str("video/x-raw,format=v210,width=1920,height=1080,framerate=50/1")
+            .expect("mxl advertise caps")
+    }
+
+    fn chain_sink_query_caps(bin: &gst::Element) -> gst::Caps {
+        bin.static_pad("sink")
+            .expect("chain missing sink pad")
+            .query_caps(None)
+    }
+
+    fn assert_pins_width(advertised: &gst::Caps, pinned: &gst::Caps) {
+        assert!(
+            advertised.can_intersect(pinned),
+            "sink must advertise pinned essence, got {advertised} vs {pinned}"
+        );
+        let mut wrong_width = pinned.clone();
+        if let Some(s) = wrong_width.make_mut().structure_mut(0) {
+            s.set("width", 1280i32);
+        }
+        assert!(
+            advertised.intersect(&wrong_width).is_empty(),
+            "sink must reject a width that is not in the advertised essence, got {advertised}"
+        );
+    }
+
+    #[test]
+    fn prepend_sink_capsfilter_pins_fields_and_features() {
+        init_gst();
+        let pinned = gst::Caps::from_str(
+            "video/x-raw(memory:NVMM),format=UYVP,width=1920,height=1080,framerate=50/1",
+        )
+        .expect("pinned caps");
+        let bin = gst::Bin::with_name("test-essence-pin");
+        let sink = gst::ElementFactory::make("fakesink")
+            .build()
+            .expect("fakesink");
+        bin.add(&sink).expect("add fakesink");
+        prepend_sink_capsfilter(&bin, &sink, &pinned).expect("prepend");
+
+        let advertised = chain_sink_query_caps(bin.upcast_ref());
+        assert_pins_width(&advertised, &pinned);
+        assert!(
+            advertised
+                .features(0)
+                .is_some_and(|f| f.contains("memory:NVMM")),
+            "pinned NVMM feature must stay on the sink pad, got {advertised}"
+        );
+        let system =
+            gst::Caps::from_str("video/x-raw,format=UYVP,width=1920,height=1080,framerate=50/1")
+                .expect("system-memory caps");
+        assert!(
+            advertised.intersect(&system).is_empty(),
+            "NVMM pin must reject system memory, got {advertised}"
+        );
+    }
+
+    #[test]
+    fn build_udpsink_sink_pad_pins_advertised_essence() {
+        let media = minimal_udp_media();
+        let chain = build_udpsink(&media, UdpVariant::V1).expect("udp sink");
+        let advertised = chain_sink_query_caps(&chain.bin);
+        assert_pins_width(&advertised, &media.caps);
+        assert!(
+            chain
+                .bin
+                .downcast_ref::<gst::Bin>()
+                .unwrap()
+                .by_name("nmossink-caps")
+                .is_some(),
+            "udp sink chain must include the shared essence capsfilter",
+        );
+    }
+
+    #[test]
+    fn build_udpsink_rejects_nvmm_when_payloader_cannot_accept_it() {
+        let mut media = minimal_udp_media();
+        let nvmm = gst::Caps::from_str("video/x-raw(memory:NVMM)").expect("nvmm");
+        media.caps = crate::essence_caps::overlay_features(&media.caps, Some(&nvmm));
+        let err = build_udpsink(&media, UdpVariant::V1)
+            .expect_err("system-memory rtpvrawpay must not link from an NVMM essence pin");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("essence capsfilter") || msg.contains("link"),
+            "expected a capsfilter link failure, got {msg}"
+        );
+    }
+
     fn child(bin: &gst::Bin, name: &str) -> gst::Element {
         bin.by_name(name)
             .unwrap_or_else(|| panic!("inner bin missing child `{name}`"))
@@ -2273,6 +2346,10 @@ mod tests {
              encoding-params=(string)2,payload=98",
         )
         .expect("static rtp caps parse");
+        media.caps = gst::Caps::from_str(
+            "audio/x-raw,format=S16BE,rate=48000,channels=2,layout=interleaved",
+        )
+        .expect("L16 raw caps");
         let chain =
             build_udpsink(&media, UdpVariant::V1).expect("L16 audio sender chain must construct");
         let bin = chain
@@ -2889,13 +2966,12 @@ mod tests {
         }
         let chain = build_nvdsudpsink(&anc_smpte291_media(), ANC_NVDSUDP_SDP)
             .expect("ANC nvdsudpsink chain");
-        // The bin wraps `capsfilter ! nvdsudpsink` so its sink pad advertises the
-        // per-frame grouping `nvdsudpsink`'s own `ANY` pad can't (see the wrap in
-        // build_nvdsudpsink): a `packet`/`line` peer must fail negotiation here.
+        // Shared essence capsfilter, with nvdsudp's ST-2038 alignment
+        // default applied before the pin.
         assert_ne!(
             chain.bin.as_ptr(),
             chain.transport.as_ptr(),
-            "ANC sink must be wrapped behind an alignment capsfilter"
+            "nvdsudpsink must sit behind the essence capsfilter"
         );
         let sink_pad = chain.bin.static_pad("sink").expect("bin sink pad");
         let advertised = sink_pad.query_caps(None);
@@ -3168,14 +3244,20 @@ mod tests {
     }
 
     #[test]
-    fn build_mxlsink_returns_chain_with_transport_equal_to_bin() {
+    fn build_mxlsink_wraps_transport_behind_essence_filter() {
         init_gst();
         if gst::ElementFactory::find("mxlsink").is_none() {
             return;
         }
-        let chain = build_mxlsink("/tmp/domain", "00000000-0000-0000-0000-000000000001")
-            .expect("mxlsink chain must construct when factory is present");
-        assert_eq!(chain.bin.as_ptr(), chain.transport.as_ptr());
+        let chain = build_mxlsink(
+            "/tmp/domain",
+            "00000000-0000-0000-0000-000000000001",
+            &mxl_advertise_caps(),
+        )
+        .expect("mxlsink chain must construct when factory is present");
+        assert_ne!(chain.bin.as_ptr(), chain.transport.as_ptr());
+        let advertised = chain_sink_query_caps(&chain.bin);
+        assert_pins_width(&advertised, &mxl_advertise_caps());
     }
 
     #[test]
@@ -3229,8 +3311,12 @@ mod tests {
             .expect("udp src chain must construct");
         assert_eq!(udp_src.transport.factory().unwrap().name(), "udpsrc",);
         if gst::ElementFactory::find("mxlsink").is_some() {
-            let mxl_sink = build_mxlsink("/tmp/domain", "00000000-0000-0000-0000-000000000004")
-                .expect("mxlsink chain must construct");
+            let mxl_sink = build_mxlsink(
+                "/tmp/domain",
+                "00000000-0000-0000-0000-000000000004",
+                &mxl_advertise_caps(),
+            )
+            .expect("mxlsink chain must construct");
             assert_eq!(mxl_sink.transport.factory().unwrap().name(), "mxlsink");
         }
         if gst::ElementFactory::find("mxlsrc").is_some() {
@@ -3384,8 +3470,12 @@ mod tests {
         if gst::ElementFactory::find("mxlsink").is_none() {
             return;
         }
-        let chain = build_mxlsink("/tmp/domain", "00000000-0000-0000-0000-000000000099")
-            .expect("mxlsink chain must construct");
+        let chain = build_mxlsink(
+            "/tmp/domain",
+            "00000000-0000-0000-0000-000000000099",
+            &mxl_advertise_caps(),
+        )
+        .expect("mxlsink chain must construct");
         let mut pay_props = gst::Structure::new_empty("properties");
         pay_props.set("perfect-rtptime", false);
         apply_mxl_sink_inner_properties(test_log_cat(), "nmossink", &chain, None, Some(&pay_props));

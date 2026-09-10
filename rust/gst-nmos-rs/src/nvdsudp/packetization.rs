@@ -14,7 +14,7 @@
 
 use anyhow::{Context, bail};
 use gstreamer as gst;
-use gstreamer::prelude::ObjectExt;
+use gstreamer::prelude::*;
 
 use crate::types::FlowFormat;
 
@@ -137,9 +137,9 @@ pub(crate) fn from_media(
 
 /// ST 2110-40 ANC (`meta/x-st-2038`). DeepStream Mode-3 ANC is inherently
 /// per-frame, but the `nvdsudpsink`/`nvdsudpsrc` pads are `ANY` so they can't
-/// carry that grouping in negotiation; it's materialised on the graph by the
-/// `capsfilter` `build_nvdsudpsink` inserts and the output caps `build_nvdsudpsrc`
-/// stamps. This build-time check complements them: classify the flow as ANC
+/// carry that grouping in negotiation; [`with_st2038_frame_alignment`]
+/// puts it on the nvdsudp sink-side capsfilter and `nvdsudpsrc` output
+/// caps. This build-time check complements them: classify the flow as ANC
 /// (drives `header-size`) and reject an *explicit* non-`frame` alignment before a
 /// chain is built. An absent alignment is fine —
 /// transport-file caps never carry the field (an explicit one can only appear
@@ -159,6 +159,23 @@ pub(crate) fn anc_from_caps(caps: &gst::Caps) -> Result<Packetization, anyhow::E
         Ok(other) => bail!("nvdsudp ANC requires alignment=frame, got `{other}`"),
     }
     Ok(Packetization::Anc)
+}
+
+/// Fill `alignment=frame` on ST-2038 caps when the field is absent.
+///
+/// `nvdsudpsink` / `nvdsudpsrc` pads are `ANY` and cannot advertise the
+/// per-frame grouping Mode 3 produces. An explicit non-`frame` value is
+/// left for [`anc_from_caps`] to reject rather than silently relabelled.
+/// Video and audio caps are returned unchanged.
+pub(crate) fn with_st2038_frame_alignment(caps: &gst::Caps) -> gst::Caps {
+    let mut out = caps.clone();
+    if let Some(s) = out.make_mut().structure_mut(0)
+        && s.name() == "meta/x-st-2038"
+        && s.get::<&str>("alignment").is_err()
+    {
+        s.set("alignment", "frame");
+    }
+    out
 }
 
 /// Line stride in bytes for one ST 2110-20 scan line.
@@ -507,8 +524,8 @@ mod tests {
     fn anc_accepts_missing_alignment() {
         init_gst();
         // Transport-file caps omit `alignment` (a buffer-grouping detail); the
-        // classifier tolerates that — the per-frame grouping is enforced on the
-        // graph by the nvdsudp capsfilter / output caps, not here.
+        // classifier tolerates that — [`with_st2038_frame_alignment`] puts it
+        // on the nvdsudp graph, not here.
         let caps = gst::Caps::from_str("meta/x-st-2038,framerate=60/1").unwrap();
         let pkt = from_media(FlowFormat::Data, &caps, &gst::Caps::new_empty())
             .expect("ANC packetization with no alignment");
@@ -520,6 +537,38 @@ mod tests {
         init_gst();
         let caps = gst::Caps::from_str("meta/x-st-2038,alignment=packets").unwrap();
         assert!(from_media(FlowFormat::Data, &caps, &gst::Caps::new_empty()).is_err());
+    }
+
+    #[test]
+    fn with_st2038_frame_alignment_fills_absent_and_leaves_other_fields() {
+        init_gst();
+        let caps = gst::Caps::from_str("meta/x-st-2038,framerate=60/1").unwrap();
+        let out = with_st2038_frame_alignment(&caps);
+        assert_eq!(
+            out.structure(0).unwrap().get::<&str>("alignment").unwrap(),
+            "frame"
+        );
+        assert_eq!(
+            out.structure(0)
+                .unwrap()
+                .get::<gst::Fraction>("framerate")
+                .unwrap(),
+            gst::Fraction::new(60, 1),
+        );
+        let video = gst::Caps::from_str("video/x-raw,format=UYVY").unwrap();
+        assert_eq!(
+            with_st2038_frame_alignment(&video).to_string(),
+            video.to_string()
+        );
+        let explicit = gst::Caps::from_str("meta/x-st-2038,alignment=packet").unwrap();
+        assert_eq!(
+            with_st2038_frame_alignment(&explicit)
+                .structure(0)
+                .unwrap()
+                .get::<&str>("alignment")
+                .unwrap(),
+            "packet"
+        );
     }
 
     #[test]
