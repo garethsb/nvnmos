@@ -1037,7 +1037,12 @@ fn build_real_sink(
             })?;
             let metadata = crate::flow_def::metadata_from_transport(transport_file)
                 .context("reading MXL flow metadata from transport file")?;
-            let chain = inner::build_mxlsink(domain_path, flow_id)?;
+            let caps = crate::session::caps_from_flow_def("nmossink", Some(transport_file))?
+                .ok_or_else(|| {
+                    anyhow!("building real MXL sink without essence caps from the transport file")
+                })?;
+            let caps = crate::essence_caps::overlay_features(&caps, settings.caps.as_ref());
+            let chain = inner::build_mxlsink(domain_path, flow_id, &caps)?;
             for (property, value) in [
                 ("label", metadata.label.as_str()),
                 ("description", metadata.description.as_str()),
