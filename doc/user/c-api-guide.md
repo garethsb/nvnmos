@@ -90,6 +90,8 @@ The HTTP APIs can be accessed at:
 http://<host-address>:<port>/
 ```
 
+The nmos-cpp experimental Settings API (`GET`/`PATCH /settings/all`) is off unless the process that loads libnvnmos sets `NVNMOS_EXPERIMENTAL_SETTINGS` to `1`, `true`, `on`, or `yes`.
+
 ## Transports
 
 Each `NvNmosSenderConfig` and `NvNmosReceiverConfig` includes a `transport` field (an `NvNmosTransport` enum) that selects the transport. A zero-initialised configuration defaults to RTP. The `transport_file` field then holds the configuring transport file as text in the appropriate format:

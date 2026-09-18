@@ -291,7 +291,9 @@ typedef struct _NvNmosNodeConfig
     /** Holds the number of #host_addresses. May be zero. */
     unsigned int num_host_addresses;
     /** Holds the port number for the HTTP APIs, e.g. 80.
-        May be zero in which case default ports are used for each API. */
+        May be zero in which case default ports are used for each API.
+        The nmos-cpp experimental Settings API is off unless the process
+        sets NVNMOS_EXPERIMENTAL_SETTINGS to 1, true, on, or yes. */
     unsigned int http_port;
 
     /** Holds the label of the node and device. May be null in which case

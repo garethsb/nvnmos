@@ -25,6 +25,7 @@
 
 #include "nvnmos.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -404,6 +405,16 @@ namespace nvnmos
 
     static const nmos::id seed_namespace_id = U("18daddcf-a234-4f59-808a-dbf6a42e17bb");
 
+    bool experimental_settings_enabled()
+    {
+        const char* value = std::getenv("NVNMOS_EXPERIMENTAL_SETTINGS");
+        if (0 == value || 0 == *value) return false;
+        return boost::iequals(value, "1")
+            || boost::iequals(value, "true")
+            || boost::iequals(value, "on")
+            || boost::iequals(value, "yes");
+    }
+
     inline std::pair<utility::string_t, utility::string_t> make_host_name_domain(const char* host_name_, const char* domain_)
     {
         // if the host name is not specified, start with the bare (system) host name
@@ -477,9 +488,19 @@ namespace nvnmos
         {
             web::json::insert(settings, std::make_pair(nmos::fields::http_port, config.http_port));
         }
+        // nmos-cpp mounts these when the port is non-negative; nvnmos does not
+        // implement IS-07 Events, IS-12 NCP, or IS-14 Configuration.
         web::json::insert(settings, std::make_pair(nmos::fields::events_port, -1));
         web::json::insert(settings, std::make_pair(nmos::fields::events_ws_port, -1));
         web::json::insert(settings, std::make_pair(nmos::fields::control_protocol_ws_port, -1));
+        web::json::insert(settings, std::make_pair(nmos::fields::configuration_port, -1));
+        // nmos-cpp experimental Settings API (GET/PATCH /settings/all) is a debug
+        // backdoor on the Node HTTP port. Off unless NVNMOS_EXPERIMENTAL_SETTINGS
+        // is 1/true/on/yes (process environment of whoever loads libnvnmos).
+        if (!experimental_settings_enabled())
+        {
+            web::json::insert(settings, std::make_pair(nmos::experimental::fields::settings_port, -1));
+        }
 
         if (0 != config.asset_tags)
         {
