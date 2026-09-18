@@ -112,6 +112,15 @@ activation subscription is missing or interrupted.
 
 When `NodeConfig.http_port` is **`0`**, the daemon picks the first port in `[MIN, MAX]` that is not already used by another Node and that the host can bind. When **`http_port` is non-zero**, the client chooses the port; the daemon rejects the create if that port is already taken by another Node or unavailable on the host.
 
+### libnvnmos (inherited by the daemon process)
+
+These are read by **libnvnmos** when a Node is created.
+Set them on the `nvnmosd` process (or any process that loads `libnvnmos.so`).
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `NVNMOS_EXPERIMENTAL_SETTINGS` | off | Mount nmos-cpp `GET`/`PATCH /settings/all` on the Node HTTP port. Enable with `1`, `true`, `on`, or `yes`. Debug only: the JSON includes internal Node settings such as stored transport files. |
+
 ### Linux glibc Heap Trimming
 
 | Variable | Default | Meaning |

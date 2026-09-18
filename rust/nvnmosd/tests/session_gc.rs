@@ -3,182 +3,26 @@
 
 //! Integration tests for implicit `CloseSession` (session GC).
 
-use std::net::UdpSocket;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+mod common;
+
 use std::time::Duration;
 
-use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
     AddSenderRequest, CloseSessionRequest, NodeConfig, OpenSessionRequest, RemoveResourceRequest,
     SubscribeActivationsRequest, Transport as ProtoTransport,
 };
-use tempfile::TempDir;
-use tokio::net::UnixStream;
 use tonic::Code;
-use tonic::transport::{Channel, Endpoint, Uri};
-use tower::service_fn;
+use tonic::transport::Channel;
 
-struct DaemonHarness {
-    _dir: TempDir,
-    uds: PathBuf,
-    child: Child,
-}
+use common::{DaemonHarness, autodetect_iface_ip, connect};
 
-impl DaemonHarness {
-    fn spawn(subscribe_sec: u64, resubscribe_sec: u64) -> Self {
-        let dir = TempDir::new().expect("tempdir");
-        let uds = dir.path().join("nvnmosd.sock");
-        nvnmosd::uds::prepare_listen_path(&uds).expect("prepare UDS path");
-        let bin = env!("CARGO_BIN_EXE_nvnmosd");
-        let lib_dir = find_libnvnmos_dir();
-        let ld_library_path = prepend_ld_library_path(&lib_dir);
-        let child = Command::new(bin)
-            .arg("--uds")
-            .arg(&uds)
-            .env("NVNMOSD_SESSION_GC", "1")
-            .env(
-                "NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC",
-                subscribe_sec.to_string(),
-            )
-            .env(
-                "NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC",
-                resubscribe_sec.to_string(),
-            )
-            .env("NVNMOSD_MALLOC_TRIM", "0")
-            .env("RUST_LOG", "error")
-            .env("LD_LIBRARY_PATH", &ld_library_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn nvnmosd");
-        Self {
-            _dir: dir,
-            uds,
-            child,
-        }
-    }
-
-    async fn ready(&mut self) {
-        wait_for_daemon(&self.uds, &mut self.child).await;
-    }
-}
-
-/// Directory containing `libnvnmos.so` for the spawned child process.
-fn find_libnvnmos_dir() -> String {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(dir) = std::env::var("NVNMOS_LIB_DIR") {
-        candidates.push(PathBuf::from(dir));
-    }
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../build"));
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("../build"));
-        candidates.push(cwd.join("build"));
-    }
-
-    for candidate in candidates {
-        if let Some(abs) = absolutize_lib_dir(&candidate) {
-            return abs;
-        }
-    }
-
-    panic!(
-        "could not find libnvnmos.so; build the C++ library (cmake --build build) \
-         or set NVNMOS_LIB_DIR to the directory containing libnvnmos.so"
-    );
-}
-
-fn absolutize_lib_dir(path: &Path) -> Option<String> {
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir().ok()?.join(path)
-    };
-    let abs = abs.canonicalize().ok()?;
-    if abs.join("libnvnmos.so").is_file() {
-        Some(abs.to_string_lossy().into_owned())
-    } else {
-        None
-    }
-}
-
-fn prepend_ld_library_path(dir: &str) -> String {
-    match std::env::var("LD_LIBRARY_PATH") {
-        Ok(existing) if !existing.is_empty() => format!("{dir}:{existing}"),
-        _ => dir.to_string(),
-    }
-}
-
-fn child_stderr(child: &mut Child) -> String {
-    use std::io::Read;
-    child
-        .stderr
-        .take()
-        .and_then(|mut stderr| {
-            let mut buf = String::new();
-            stderr.read_to_string(&mut buf).ok()?;
-            Some(buf)
-        })
-        .unwrap_or_default()
-}
-
-impl Drop for DaemonHarness {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-async fn wait_for_daemon(uds: &Path, child: &mut Child) {
-    for _ in 0..200 {
-        if let Ok(Some(status)) = child.try_wait() {
-            let stderr = child_stderr(child);
-            panic!(
-                "nvnmosd exited before binding UDS (status={status}); \
-                 ensure libnvnmos.so is in LD_LIBRARY_PATH (build the C++ \
-                 library under ../../build or set NVNMOS_LIB_DIR). stderr:\n{stderr}"
-            );
-        }
-        if UnixStream::connect(uds).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    let stderr = child_stderr(child);
-    panic!(
-        "nvnmosd did not become ready on {}; stderr:\n{stderr}",
-        uds.display()
-    );
-}
-
-async fn connect(uds: &Path) -> NvnmosDaemonClient<Channel> {
-    let uds = uds.to_path_buf();
-    let endpoint = Endpoint::try_from("http://[::1]:50051").expect("endpoint uri");
-    let channel = endpoint
-        .connect_with_connector(service_fn(move |_: Uri| {
-            let uds = uds.clone();
-            async move {
-                let stream = UnixStream::connect(uds).await?;
-                Ok::<_, std::io::Error>(TokioIo::new(stream))
-            }
-        }))
-        .await
-        .expect("connect UDS");
-    NvnmosDaemonClient::new(channel)
-}
-
-fn autodetect_iface_ip() -> String {
-    let sock = match UdpSocket::bind("0.0.0.0:0") {
-        Ok(sock) => sock,
-        Err(_) => return "127.0.0.1".to_string(),
-    };
-    if sock.connect("8.8.8.8:80").is_err() {
-        return "127.0.0.1".to_string();
-    }
-    sock.local_addr()
-        .map(|a| a.ip().to_string())
-        .unwrap_or_else(|_| "127.0.0.1".to_string())
+fn spawn_gc_daemon() -> DaemonHarness {
+    DaemonHarness::spawn(&[
+        ("NVNMOSD_SESSION_GC", "1"),
+        ("NVNMOSD_SESSION_SUBSCRIBE_TIMEOUT_SEC", "5"),
+        ("NVNMOSD_SESSION_RESUBSCRIBE_TIMEOUT_SEC", "2"),
+    ])
 }
 
 fn minimal_sender_sdp(name: &str, iface_ip: &str) -> String {
@@ -227,7 +71,7 @@ fn expect_code(err: tonic::Status, expected: Code) {
 /// Case A — subscribe before add.
 #[tokio::test]
 async fn subscribe_required_before_add() {
-    let mut harness = DaemonHarness::spawn(5, 2);
+    let mut harness = spawn_gc_daemon();
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let seed = "session-gc-a";
@@ -273,7 +117,7 @@ async fn subscribe_required_before_add() {
 /// Case B — resubscribe within timeout; watchdog cancelled while stream open.
 #[tokio::test]
 async fn resubscribe_cancels_watchdog() {
-    let mut harness = DaemonHarness::spawn(5, 2);
+    let mut harness = spawn_gc_daemon();
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let seed = "session-gc-b";
@@ -331,7 +175,7 @@ async fn resubscribe_cancels_watchdog() {
 /// Case C — resubscribe timeout triggers implicit CloseSession.
 #[tokio::test]
 async fn resubscribe_timeout_closes_session() {
-    let mut harness = DaemonHarness::spawn(5, 2);
+    let mut harness = spawn_gc_daemon();
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let seed = "session-gc-c";
@@ -396,7 +240,7 @@ async fn resubscribe_timeout_closes_session() {
 /// Case D — subscribe timeout after OpenSession.
 #[tokio::test]
 async fn subscribe_timeout_closes_session() {
-    let mut harness = DaemonHarness::spawn(5, 2);
+    let mut harness = spawn_gc_daemon();
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let seed = "session-gc-d";
