@@ -63,12 +63,37 @@ impl DaemonHarness {
     pub async fn ready(&mut self) {
         wait_for_daemon(&self.uds, &mut self.child).await;
     }
+
+    /// Panic if the daemon has already exited, including its wait status and
+    /// remaining stderr. No-op while the process is still running.
+    pub fn assert_running(&mut self) {
+        if let Some((status, stderr)) = self.exited() {
+            panic!("nvnmosd exited ({status}); stderr:\n{stderr}");
+        }
+    }
+
+    fn exited(&mut self) -> Option<(std::process::ExitStatus, String)> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some((status, child_stderr(&mut self.child))),
+            _ => None,
+        }
+    }
 }
 
 impl Drop for DaemonHarness {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                if self.child.stderr.is_some() {
+                    let stderr = child_stderr(&mut self.child);
+                    eprintln!("nvnmosd already exited ({status}); stderr:\n{stderr}");
+                }
+            }
+            _ => {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
     }
 }
 
