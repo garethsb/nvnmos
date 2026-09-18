@@ -171,9 +171,9 @@ async fn start_parked_in_band_activation_on_stream(
     let staged_path = staged_sender_path(resource_id);
     let host = "127.0.0.1";
     tokio::spawn(async move {
-        if let Err(e) = patch_activate_immediate(host, http_port, &staged_path, true).await {
-            eprintln!("[lock-ordering test] PATCH /staged failed: {e}");
-        }
+        // CloseSession (and test teardown) can drop the Node HTTP listener
+        // under this PATCH; an empty response is expected, not a failure.
+        let _ = patch_activate_immediate(host, http_port, &staged_path, true).await;
     });
     tokio::time::timeout(Duration::from_secs(10), parked_rx)
         .await
@@ -233,9 +233,11 @@ async fn in_band_activation_does_not_deadlock_add_sender() {
          (daemon deadlocked?)",
         CONCURRENT_RPC_BUDGET,
     );
-    add_result
-        .expect("AddSender s2 join")
-        .expect("AddSender s2 RPC");
+    let add_rpc = add_result.expect("AddSender s2 join");
+    if add_rpc.is_err() {
+        harness.assert_running();
+    }
+    add_rpc.expect("AddSender s2 RPC");
 
     let _ = client
         .close_session(CloseSessionRequest {
@@ -291,9 +293,11 @@ async fn in_band_activation_does_not_deadlock_close_session() {
          (daemon deadlocked?)",
         CONCURRENT_RPC_BUDGET,
     );
-    close_result
-        .expect("CloseSession join")
-        .expect("CloseSession RPC");
+    let close_rpc = close_result.expect("CloseSession join");
+    if close_rpc.is_err() {
+        harness.assert_running();
+    }
+    close_rpc.expect("CloseSession RPC");
 
     assert!(
         os_port_free(port),
