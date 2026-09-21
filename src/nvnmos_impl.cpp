@@ -113,6 +113,9 @@ namespace nvnmos
         // get the optional session information
         utility::string_t get_session_description_session_info(const web::json::value& session_description);
 
+        // nmos::sdp_parameters has no i= field, so it has to be set on the session description
+        void set_session_description_session_info(web::json::value& session_description, const utility::string_t& session_info);
+
         // get the optional capabilities from the custom attribute
         bool has_session_description_caps(const web::json::value& session_description);
 
@@ -209,8 +212,8 @@ namespace nvnmos
         web::json::value resolve_mxl_flow_id(const web::json::value& constraint);
         // extract the top-level 'id' property (or empty)
         utility::string_t get_mxl_flow_def_id(const web::json::value& flow_def);
-        // produce a flow definition JSON string with the active MXL transport parameters spliced in
-        std::string make_mxl_flow_def(web::json::value flow_def, const utility::string_t& mxl_domain_id, const utility::string_t& mxl_flow_id);
+        // produce a flow definition JSON string with IS-04 label/description and the active MXL transport parameters spliced in
+        std::string make_mxl_flow_def(web::json::value flow_def, const utility::string_t& label, const utility::string_t& description, const utility::string_t& mxl_domain_id, const utility::string_t& mxl_flow_id);
     }
 
     void node_implementation_init_(nmos::resources& node_resources, const std::vector<web::hosts::experimental::host_interface>& host_interfaces, nmos::settings& settings, slog::base_gate& gate)
@@ -1233,7 +1236,9 @@ namespace nvnmos
 
                 // use nmos::make_session_description rather than impl::make_session_description for /transportfile
                 // because e.g. the custom SDP attributes in nvnmos::attributes are only for 'internal' use
+                sdp_params.session_name = nmos::fields::label(sender.data);
                 auto session_description = nmos::make_session_description(sdp_params, transport_params);
+                impl::set_session_description_session_info(session_description, nmos::fields::description(sender.data));
                 auto sdp = utility::s2us(sdp::make_session_description(session_description));
                 endpoint_transportfile = nmos::make_connection_rtp_sender_transportfile(sdp);
             }
@@ -1281,7 +1286,8 @@ namespace nvnmos
 
                     // if a transport file hasn't been staged to a receiver, or a sender hasn't been activated, assume default values
                     // based on the original SDP data used to configure the receiver or sender
-                    const auto& transportfile_data = !transportfile_data_or_null.is_null() && !transportfile_data_or_null.as_string().empty()
+                    const auto has_transportfile_data = !transportfile_data_or_null.is_null() && !transportfile_data_or_null.as_string().empty();
+                    const auto& transportfile_data = has_transportfile_data
                         ? transportfile_data_or_null.as_string()
                         : nvnmos::fields::transport_file(config->second);
 
@@ -1323,7 +1329,13 @@ namespace nvnmos
                     sdp_params.origin.session_version = utility::ostringstreamed(sdp::ntp_now() >> 32);
 
                     const auto group_hint = impl::get_group_hint(resource);
-                    const auto& session_info = nmos::fields::description(resource.data);
+                    // update session name and info (s=/i=) based on received SDP data or IS-04 label and description
+                    // (empty label is written as a single-space s=; empty description omits i=)
+                    const auto has_received_transportfile_data = nmos::types::receiver == id_type.second && has_transportfile_data;
+                    if (!has_received_transportfile_data) sdp_params.session_name = nmos::fields::label(resource.data);
+                    const auto session_info = has_received_transportfile_data
+                        ? impl::get_session_description_session_info(parsed_sdp)
+                        : nmos::fields::description(resource.data);
                     const auto caps = nmos::types::receiver == id_type.second && impl::has_no_receiver_caps(resource.data);
                     auto merged_sdp = impl::make_session_description(id_type.second, name, group_hint, session_info, sdp_params, transport_params, caps);
                     const auto sdp_data = sdp::make_session_description(merged_sdp);
@@ -1357,7 +1369,7 @@ namespace nvnmos
 
                     const auto& config_flow_def_data = nvnmos::fields::transport_file(config->second);
                     auto config_flow_def = web::json::value::parse(config_flow_def_data);
-                    const auto flow_def_data = impl::make_mxl_flow_def(std::move(config_flow_def), mxl_domain_id, mxl_flow_id);
+                    const auto flow_def_data = impl::make_mxl_flow_def(std::move(config_flow_def), nmos::fields::label(resource.data), nmos::fields::description(resource.data), mxl_domain_id, mxl_flow_id);
 
                     connection_activated(id_type.second, name, flow_def_data);
                 }
@@ -1563,8 +1575,6 @@ namespace nvnmos
         // with support for the custom SDP attributes in nvnmos::attributes for senders as well as receivers
         web::json::value make_session_description(const nmos::type& type, const nvnmos::name& name, const utility::string_t& group_hint, const utility::string_t& session_info, const nmos::sdp_parameters& sdp_params, const web::json::value& transport_params, bool caps)
         {
-            using web::json::value;
-
             auto session_description = nmos::make_session_description(sdp_params, transport_params);
 
             {
@@ -1573,10 +1583,7 @@ namespace nvnmos
                 web::json::push_back(session_attributes, sdp::named_value(nvnmos::attributes::name, name));
                 if (!group_hint.empty()) web::json::push_back(session_attributes, sdp::named_value(nvnmos::attributes::group_hint, group_hint));
 
-                if (!session_info.empty())
-                {
-                    session_description[sdp::fields::information] = value::string(session_info);
-                }
+                impl::set_session_description_session_info(session_description, session_info);
             }
 
             auto& media_descriptions = session_description[sdp::fields::media_descriptions];
@@ -1783,6 +1790,17 @@ namespace nvnmos
         utility::string_t get_session_description_session_info(const web::json::value& session_description)
         {
             return sdp::fields::information(session_description);
+        }
+
+        // nmos::sdp_parameters has no i= field, so it has to be set on the session description
+        void set_session_description_session_info(web::json::value& session_description, const utility::string_t& session_info)
+        {
+            using web::json::value;
+
+            if (!session_info.empty())
+            {
+                session_description[sdp::fields::information] = value::string(session_info);
+            }
         }
 
         // get the optional capabilities from the custom attribute
@@ -2317,11 +2335,14 @@ namespace nvnmos
                 : utility::string_t{};
         }
 
-        // produce a flow definition JSON string with the active MXL transport parameters spliced in
-        std::string make_mxl_flow_def(web::json::value flow_def, const utility::string_t& mxl_domain_id, const utility::string_t& mxl_flow_id)
+        // produce a flow definition JSON string with IS-04 label/description and the active MXL transport parameters spliced in
+        std::string make_mxl_flow_def(web::json::value flow_def, const utility::string_t& label, const utility::string_t& description, const utility::string_t& mxl_domain_id, const utility::string_t& mxl_flow_id)
         {
             using web::json::value;
             using web::json::value_of;
+
+            flow_def[nmos::fields::label] = value::string(label);
+            flow_def[nmos::fields::description] = value::string(description);
 
             if (!flow_def.has_object_field(nmos::fields::tags))
             {

@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
+use nvnmos_rpc::v1::{NodeConfig, OpenSessionRequest};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream as AsyncTcpStream, UnixStream};
@@ -190,6 +191,27 @@ pub async fn connect(uds: &Path) -> NvnmosDaemonClient<Channel> {
     NvnmosDaemonClient::new(channel)
 }
 
+pub async fn open_session_with_port(
+    client: &mut NvnmosDaemonClient<Channel>,
+    seed: &str,
+    http_port: u16,
+) -> String {
+    let resp = client
+        .open_session(OpenSessionRequest {
+            node_config: Some(NodeConfig {
+                seed: seed.to_string(),
+                http_port: u32::from(http_port),
+                host_addresses: vec!["127.0.0.1".to_string()],
+                ..Default::default()
+            }),
+        })
+        .await
+        .expect("OpenSession")
+        .into_inner();
+    assert_eq!(resp.http_port as u16, http_port);
+    resp.session_handle
+}
+
 pub fn autodetect_iface_ip() -> String {
     use std::net::UdpSocket;
     let sock = match UdpSocket::bind("0.0.0.0:0") {
@@ -274,6 +296,65 @@ pub async fn http_patch(
     body: &str,
 ) -> Result<(u16, String), String> {
     http_request("PATCH", host, port, path, Some(body)).await
+}
+
+/// PATCH `/staged` with `activation.mode = activate_immediate` and
+/// `master_enable: true`, copying transport binding from `/active`.
+///
+/// `transport_file` is SDP `data` (`type` is `application/sdp`). When
+/// `mxl_flow_id` is set (MXL receivers), transport_params also get
+/// `mxl_domain_id` `"auto"`.
+pub async fn http_patch_activate_immediate(
+    host: &str,
+    port: u16,
+    staged_path: &str,
+    transport_file: Option<&str>,
+    mxl_flow_id: Option<&str>,
+) -> Result<(), String> {
+    let active_path = staged_path.trim_end_matches("/staged");
+    let (status, body) = http_get(host, port, &format!("{active_path}/active")).await?;
+    if !(200..300).contains(&status) {
+        return Err(format!("GET /active returned HTTP {status}: {body}"));
+    }
+    let json_start = body
+        .find('{')
+        .ok_or_else(|| format!("no JSON in GET /active: {body}"))?;
+    let active: serde_json::Value =
+        serde_json::from_str(&body[json_start..]).map_err(|e| e.to_string())?;
+    let mut patch = serde_json::json!({
+        "master_enable": true,
+        "activation": { "mode": "activate_immediate" }
+    });
+    if let Some(tp) = active.get("transport_params") {
+        patch["transport_params"] = tp.clone();
+    }
+    if let Some(id) = active.get("sender_id") {
+        patch["sender_id"] = id.clone();
+    }
+    if let Some(id) = active.get("receiver_id") {
+        patch["receiver_id"] = id.clone();
+    }
+    if let Some(sdp) = transport_file {
+        patch["transport_file"] = serde_json::json!({
+            "type": "application/sdp",
+            "data": sdp,
+        });
+    }
+    if let Some(flow_id) = mxl_flow_id {
+        let legs = patch["transport_params"]
+            .as_array_mut()
+            .filter(|legs| !legs.is_empty())
+            .ok_or_else(|| "no transport_params to set mxl_flow_id".to_string())?;
+        for leg in legs {
+            leg["mxl_flow_id"] = serde_json::Value::String(flow_id.to_string());
+            leg["mxl_domain_id"] = serde_json::Value::String("auto".to_string());
+        }
+    }
+    let (status, resp) = http_patch(host, port, staged_path, &patch.to_string()).await?;
+    if !(200..300).contains(&status) {
+        return Err(format!("PATCH /staged returned HTTP {status}: {resp}"));
+    }
+    Ok(())
 }
 
 pub async fn http_get_json(http_port: u16, path: &str) -> serde_json::Value {
