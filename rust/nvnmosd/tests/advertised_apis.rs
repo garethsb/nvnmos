@@ -7,12 +7,12 @@
 
 mod common;
 
+use nvnmos_rpc::v1::CloseSessionRequest;
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
-use nvnmos_rpc::v1::{CloseSessionRequest, NodeConfig, OpenSessionRequest};
 use serde_json::Value;
 use tonic::transport::Channel;
 
-use common::{DaemonHarness, connect, ephemeral_http_port, http_get_json};
+use common::{DaemonHarness, connect, ephemeral_http_port, http_get_json, open_session_with_port};
 
 fn json_string_set(value: &Value) -> Vec<String> {
     value
@@ -54,20 +54,8 @@ async fn open_empty_node(
             .map(|(k, v)| format!("{k}={v}"))
             .unwrap_or_else(|| "default".to_owned())
     );
-    let resp = client
-        .open_session(OpenSessionRequest {
-            node_config: Some(NodeConfig {
-                seed,
-                http_port: u32::from(http_port),
-                host_addresses: vec!["127.0.0.1".to_string()],
-                ..Default::default()
-            }),
-        })
-        .await
-        .expect("OpenSession")
-        .into_inner();
-    assert_eq!(resp.http_port as u16, http_port);
-    (harness, client, resp.session_handle, http_port)
+    let session = open_session_with_port(&mut client, &seed, http_port).await;
+    (harness, client, session, http_port)
 }
 
 #[tokio::test]

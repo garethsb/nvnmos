@@ -17,15 +17,15 @@ use std::time::Duration;
 
 use nvnmos_rpc::v1::nvnmos_daemon_client::NvnmosDaemonClient;
 use nvnmos_rpc::v1::{
-    AddSenderRequest, CloseSessionRequest, NodeConfig, OpenSessionRequest,
-    SubscribeActivationsRequest, Transport as ProtoTransport,
+    AddSenderRequest, CloseSessionRequest, SubscribeActivationsRequest, Transport as ProtoTransport,
 };
 use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 use tonic::transport::Channel;
 
 use common::{
-    DaemonHarness, autodetect_iface_ip, connect, ephemeral_http_port, http_get, http_patch,
+    DaemonHarness, autodetect_iface_ip, connect, ephemeral_http_port,
+    http_patch_activate_immediate, open_session_with_port,
 };
 
 /// Upper bound the concurrent RPC is allowed to take. On the pre-fix daemon the
@@ -61,45 +61,6 @@ fn os_port_free(port: u16) -> bool {
     TcpListener::bind(("0.0.0.0", port)).is_ok()
 }
 
-/// Build a PATCH body that preserves transport binding from `/active`, mirroring
-/// `gst-nmos-rs-demo.sh` `patch_master_enable`.
-async fn patch_activate_immediate(
-    host: &str,
-    port: u16,
-    staged_path: &str,
-    enable: bool,
-) -> Result<(), String> {
-    let active_path = staged_path.trim_end_matches("/staged");
-    let (status, body) = http_get(host, port, &format!("{active_path}/active")).await?;
-    if !(200..300).contains(&status) {
-        return Err(format!("GET /active returned HTTP {status}: {body}"));
-    }
-    let json_start = body
-        .find('{')
-        .ok_or_else(|| format!("no JSON in GET /active: {body}"))?;
-    let active: serde_json::Value =
-        serde_json::from_str(&body[json_start..]).map_err(|e| e.to_string())?;
-    let mut patch = serde_json::json!({
-        "master_enable": enable,
-        "activation": { "mode": "activate_immediate" }
-    });
-    if let Some(tp) = active.get("transport_params") {
-        patch["transport_params"] = tp.clone();
-    }
-    if let Some(id) = active.get("sender_id") {
-        patch["sender_id"] = id.clone();
-    }
-    if let Some(id) = active.get("receiver_id") {
-        patch["receiver_id"] = id.clone();
-    }
-    let patch_body = patch.to_string();
-    let (status, resp) = http_patch(host, port, staged_path, &patch_body).await?;
-    if !(200..300).contains(&status) {
-        return Err(format!("PATCH /staged returned HTTP {status}: {resp}"));
-    }
-    Ok(())
-}
-
 struct ParkedActivation {
     _parker: tokio::task::JoinHandle<()>,
 }
@@ -121,26 +82,6 @@ fn park_first_activation_on_stream(
         std::future::pending::<()>().await;
     });
     (ParkedActivation { _parker: parker }, parked_rx)
-}
-
-async fn open_session_with_port(
-    client: &mut NvnmosDaemonClient<Channel>,
-    seed: &str,
-    http_port: u16,
-) -> (String, u16) {
-    let resp = client
-        .open_session(OpenSessionRequest {
-            node_config: Some(NodeConfig {
-                seed: seed.to_string(),
-                http_port: u32::from(http_port),
-                host_addresses: vec!["127.0.0.1".to_string()],
-                ..Default::default()
-            }),
-        })
-        .await
-        .expect("OpenSession")
-        .into_inner();
-    (resp.session_handle, resp.http_port as u16)
 }
 
 async fn subscribe_activations(
@@ -173,7 +114,7 @@ async fn start_parked_in_band_activation_on_stream(
     tokio::spawn(async move {
         // CloseSession (and test teardown) can drop the Node HTTP listener
         // under this PATCH; an empty response is expected, not a failure.
-        let _ = patch_activate_immediate(host, http_port, &staged_path, true).await;
+        let _ = http_patch_activate_immediate(host, http_port, &staged_path, None, None).await;
     });
     tokio::time::timeout(Duration::from_secs(10), parked_rx)
         .await
@@ -190,10 +131,8 @@ async fn in_band_activation_does_not_deadlock_add_sender() {
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let iface = autodetect_iface_ip();
-    let port = ephemeral_http_port();
-
-    let (session, http_port) = open_session_with_port(&mut client, "lock-add", port).await;
-    assert_eq!(http_port, port);
+    let http_port = ephemeral_http_port();
+    let session = open_session_with_port(&mut client, "lock-add", http_port).await;
 
     let stream = subscribe_activations(&mut client, &session).await;
 
@@ -254,10 +193,8 @@ async fn in_band_activation_does_not_deadlock_close_session() {
     harness.ready().await;
     let mut client = connect(&harness.uds).await;
     let iface = autodetect_iface_ip();
-    let port = ephemeral_http_port();
-
-    let (session, http_port) = open_session_with_port(&mut client, "lock-close", port).await;
-    assert_eq!(http_port, port);
+    let http_port = ephemeral_http_port();
+    let session = open_session_with_port(&mut client, "lock-close", http_port).await;
 
     let stream = subscribe_activations(&mut client, &session).await;
 
@@ -300,7 +237,7 @@ async fn in_band_activation_does_not_deadlock_close_session() {
     close_rpc.expect("CloseSession RPC");
 
     assert!(
-        os_port_free(port),
-        "http port {port} must be bindable after CloseSession (LISTEN leaked?)"
+        os_port_free(http_port),
+        "http port {http_port} must be bindable after CloseSession (LISTEN leaked?)"
     );
 }
