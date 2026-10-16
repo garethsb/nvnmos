@@ -5,6 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Five-minute gst-nmos-rs intro
 
+This talk was given as part of the EBU Open Source Meetup at IBC 2026. The
+[recording](https://tech.ebu.ch/publications/presentations/2026/ibc_open_source_meetup/gst-nmos-rs)
+is available.
+
 Producer and consumer start themselves (`auto-activate=true`). The transformer
 does not: connect it in NMOS Controller. Replace only the `identity !`
 line to change the picture.
